@@ -6,8 +6,27 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		1230BBF92F63F45300E128E3 /* ApprovalsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1230BBF82F63F45300E128E3 /* ApprovalsView.swift */; };
+		1230BBFB2F63F47600E128E3 /* UsageCostView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1230BBFA2F63F47600E128E3 /* UsageCostView.swift */; };
+		1230BBFD2F63F53700E128E3 /* ToolsCatalogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1230BBFC2F63F53700E128E3 /* ToolsCatalogView.swift */; };
+		1230BBFF2F63F53700E128E3 /* DevicesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1230BBFE2F63F53700E128E3 /* DevicesView.swift */; };
+		1230BC012F63F61800E128E3 /* MarkdownTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1230BC002F63F61800E128E3 /* MarkdownTextView.swift */; };
+		12976A572F60244900A2B716 /* CronView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12976A562F60244900A2B716 /* CronView.swift */; };
+		12976A592F60244900A2B716 /* HooksView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12976A582F60244900A2B716 /* HooksView.swift */; };
+		12976A5B2F602A0100A2B716 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12976A5A2F602A0100A2B716 /* SettingsView.swift */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
+		1230BBF82F63F45300E128E3 /* ApprovalsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalsView.swift; sourceTree = "<group>"; };
+		1230BBFA2F63F47600E128E3 /* UsageCostView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageCostView.swift; sourceTree = "<group>"; };
+		1230BBFC2F63F53700E128E3 /* ToolsCatalogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolsCatalogView.swift; sourceTree = "<group>"; };
+		1230BBFE2F63F53700E128E3 /* DevicesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesView.swift; sourceTree = "<group>"; };
+		1230BC002F63F61800E128E3 /* MarkdownTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTextView.swift; sourceTree = "<group>"; };
 		1269CFD92F5FB63E0028727C /* app.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = app.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		12976A562F60244900A2B716 /* CronView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CronView.swift; sourceTree = "<group>"; };
+		12976A582F60244900A2B716 /* HooksView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HooksView.swift; sourceTree = "<group>"; };
+		12976A5A2F602A0100A2B716 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -34,6 +53,14 @@
 			children = (
 				1269CFDB2F5FB63E0028727C /* app */,
 				1269CFDA2F5FB63E0028727C /* Products */,
+				12976A562F60244900A2B716 /* CronView.swift */,
+				12976A582F60244900A2B716 /* HooksView.swift */,
+				12976A5A2F602A0100A2B716 /* SettingsView.swift */,
+				1230BBF82F63F45300E128E3 /* ApprovalsView.swift */,
+				1230BBFA2F63F47600E128E3 /* UsageCostView.swift */,
+				1230BBFC2F63F53700E128E3 /* ToolsCatalogView.swift */,
+				1230BBFE2F63F53700E128E3 /* DevicesView.swift */,
+				1230BC002F63F61800E128E3 /* MarkdownTextView.swift */,
 			);
 			sourceTree = "<group>";
 		};
@@ -119,6 +146,14 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1230BC012F63F61800E128E3 /* MarkdownTextView.swift in Sources */,
+				12976A572F60244900A2B716 /* CronView.swift in Sources */,
+				1230BBFB2F63F47600E128E3 /* UsageCostView.swift in Sources */,
+				1230BBFF2F63F53700E128E3 /* DevicesView.swift in Sources */,
+				12976A592F60244900A2B716 /* HooksView.swift in Sources */,
+				1230BBF92F63F45300E128E3 /* ApprovalsView.swift in Sources */,
+				12976A5B2F602A0100A2B716 /* SettingsView.swift in Sources */,
+				1230BBFD2F63F53700E128E3 /* ToolsCatalogView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -250,15 +285,17 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 37W2CYRZ6F;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = AgentCenter;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -282,15 +319,17 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 37W2CYRZ6F;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = AgentCenter;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

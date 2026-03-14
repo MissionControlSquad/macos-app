@@ -6,31 +6,12 @@ struct SkillsPluginsView: View {
     @State private var skillsOutput = ""
     @State private var pluginsOutput = ""
     @State private var isLoading = false
-    @State private var actionResult = ""
-    @State private var actionIsError = false
+    @State private var toast = ToastState()
     @State private var installSpec = ""
+    @State private var showUpdateAllConfirm = false
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Skills & Plugins")
-                    .font(.title.bold())
-                Spacer()
-                Button {
-                    Task { await refresh() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                if isLoading {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-            }
-            .padding()
-
-            Divider()
-
-            // Tab toggle
             Picker("", selection: $selectedTab) {
                 Text("Skills").tag(0)
                 Text("Plugins").tag(1)
@@ -47,8 +28,44 @@ struct SkillsPluginsView: View {
                 pluginsTab
             }
         }
+        .navigationTitle("Skills & Plugins")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Button {
+                        Task { await refresh() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .help("Refresh skills and plugins")
+                }
+            }
+        }
         .task {
             await refresh()
+        }
+        .confirmationDialog(
+            "Update All Plugins",
+            isPresented: $showUpdateAllConfirm
+        ) {
+            Button("Update All", role: .destructive) {
+                Task {
+                    isLoading = true
+                    let result = await service.runCommand("openclaw plugins update --all")
+                    toast.show(
+                        result.exitCode == 0 ? "All plugins updated!" : result.output,
+                        isError: result.exitCode != 0
+                    )
+                    await refresh()
+                    isLoading = false
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will update all installed plugins to their latest versions. Continue?")
         }
     }
 
@@ -58,11 +75,11 @@ struct SkillsPluginsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 if skillsOutput.isEmpty {
-                    ContentUnavailableView {
-                        Label("No Skills Data", systemImage: "star")
-                    } description: {
-                        Text("Could not load skills. Make sure OpenClaw is running.")
-                    }
+                    EmptyStateView(
+                        icon: "star",
+                        title: "No Skills Data",
+                        message: "Could not load skills. Make sure OpenClaw is running."
+                    )
                 } else {
                     Text(skillsOutput)
                         .font(.system(.caption, design: .monospaced))
@@ -73,7 +90,7 @@ struct SkillsPluginsView: View {
                 HStack(spacing: 12) {
                     Button {
                         Task {
-                            let result = await service.runCommand("openclaw skills check")
+                            let result = await service.runCommand("openclaw skills check --json")
                             skillsOutput = result.output
                         }
                     } label: {
@@ -102,11 +119,11 @@ struct SkillsPluginsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 if pluginsOutput.isEmpty {
-                    ContentUnavailableView {
-                        Label("No Plugins Data", systemImage: "puzzlepiece")
-                    } description: {
-                        Text("Could not load plugins. Make sure OpenClaw is running.")
-                    }
+                    EmptyStateView(
+                        icon: "puzzlepiece",
+                        title: "No Plugins Data",
+                        message: "Could not load plugins. Make sure OpenClaw is running."
+                    )
                 } else {
                     Text(pluginsOutput)
                         .font(.system(.caption, design: .monospaced))
@@ -115,10 +132,7 @@ struct SkillsPluginsView: View {
                 }
 
                 // Install plugin
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Install Plugin")
-                        .font(.headline)
-
+                GroupBox("Install Plugin") {
                     HStack {
                         TextField("npm package or path (e.g. @openclaw/plugin-voice)", text: $installSpec)
                             .textFieldStyle(.roundedBorder)
@@ -127,10 +141,10 @@ struct SkillsPluginsView: View {
                             Task {
                                 isLoading = true
                                 let result = await service.installPlugin(spec: installSpec)
-                                actionResult = result.exitCode == 0
-                                    ? "Plugin installed!"
-                                    : result.output
-                                actionIsError = result.exitCode != 0
+                                toast.show(
+                                    result.exitCode == 0 ? "Plugin installed!" : result.output,
+                                    isError: result.exitCode != 0
+                                )
                                 installSpec = ""
                                 await refresh()
                                 isLoading = false
@@ -142,9 +156,6 @@ struct SkillsPluginsView: View {
                         .disabled(installSpec.isEmpty)
                     }
                 }
-                .padding()
-                .background(Color(.controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
 
                 // Actions
                 HStack(spacing: 12) {
@@ -159,27 +170,14 @@ struct SkillsPluginsView: View {
                     .buttonStyle(.bordered)
 
                     Button {
-                        Task {
-                            isLoading = true
-                            let result = await service.runCommand("openclaw plugins update --all")
-                            actionResult = result.exitCode == 0
-                                ? "All plugins updated!"
-                                : result.output
-                            actionIsError = result.exitCode != 0
-                            await refresh()
-                            isLoading = false
-                        }
+                        showUpdateAllConfirm = true
                     } label: {
                         Label("Update All", systemImage: "arrow.clockwise")
                     }
                     .buttonStyle(.bordered)
                 }
 
-                if !actionResult.isEmpty {
-                    Text(actionResult)
-                        .font(.callout)
-                        .foregroundStyle(actionIsError ? .red : .green)
-                }
+                ToastBanner(toast: toast)
             }
             .padding()
         }

@@ -1,7 +1,7 @@
 import Foundation
 
-/// Central service for all OpenClaw CLI interactions.
-/// Every data fetch goes through this service using `--json` output.
+/// Central service for all OpenClaw interactions.
+/// Prefers gateway WebSocket RPCs when connected, falls back to CLI.
 @MainActor
 @Observable
 class OpenClawService {
@@ -15,25 +15,44 @@ class OpenClawService {
 
     private let shell = ShellService()
 
+    /// Optional gateway reference for WebSocket-first operations
+    var gateway: GatewayWebSocket?
+
     // MARK: - Agents
 
-    /// Fetch all agents with full details via `openclaw agents list --json`
+    /// Fetch all agents — tries gateway RPC first, falls back to CLI
     func fetchAgents() async {
+        // CLI returns full agent info (workspace, model, bindings, etc.)
+        // Gateway only returns minimal info (id, name) — use as fallback
         let result = await shell.run("openclaw agents list --json", recordHistory: false)
         if result.exitCode == 0, let data = result.output.data(using: .utf8) {
             do {
                 agents = try JSONDecoder().decode([Agent].self, from: data)
+                return
             } catch {
-                // Might be wrapped in an object
                 if let wrapper = try? JSONDecoder().decode(AgentsWrapper.self, from: data) {
                     agents = wrapper.agents
-                } else {
-                    agents = parseAgentsPlainText(result.output)
+                    return
                 }
             }
-        } else {
-            agents = parseAgentsPlainText(result.output)
         }
+
+        // Fallback: gateway (minimal agent info)
+        if let gw = gateway, gw.isConnected {
+            do {
+                let payload = try await gw.agentsList()
+                if let agentsList = payload["agents"] as? [[String: Any]] {
+                    let data = try JSONSerialization.data(withJSONObject: agentsList)
+                    agents = try JSONDecoder().decode([Agent].self, from: data)
+                    return
+                }
+            } catch {
+                print("[Service] Gateway agents.list also failed: \(error)")
+            }
+        }
+
+        // Last resort: parse plain text
+        agents = parseAgentsPlainText(result.output)
     }
 
     /// Get bindings for a specific agent
@@ -93,8 +112,30 @@ class OpenClawService {
         gatewayLog += "[\(time)] \(message)\n"
     }
 
-    /// Check gateway status via `openclaw gateway status --json`
+    /// Check gateway status — tries gateway health RPC first, falls back to CLI
     func fetchGatewayStatus() async {
+        // If gateway WebSocket is connected, we know it's running
+        if let gw = gateway, gw.isConnected {
+            do {
+                let payload = try await gw.health()
+                // Build a minimal GatewayStatus from health response
+                let port = payload["port"] as? Int
+                let status = payload["status"] as? String
+                if status == "ok" || !payload.raw.isEmpty {
+                    gatewayStatus = GatewayStatus(
+                        service: GatewayService(label: "com.openclaw.gateway", loaded: true, runtime: GatewayRuntime(status: "running", state: nil, pid: nil), configAudit: nil),
+                        gateway: GatewayConfig(bindMode: nil, bindHost: nil, port: port ?? 18789, probeUrl: nil, probeNote: nil),
+                        port: GatewayPort(port: port ?? 18789, status: "open"),
+                        rpc: GatewayRPC(ok: true, error: nil, url: "ws://127.0.0.1:\(port ?? 18789)")
+                    )
+                    return
+                }
+            } catch {
+                print("[Service] Gateway health RPC failed: \(error), falling back to CLI")
+            }
+        }
+
+        // Fallback: CLI
         let result = await shell.run("openclaw gateway status --json", recordHistory: false)
         if let data = result.output.data(using: .utf8) {
             gatewayStatus = try? JSONDecoder().decode(GatewayStatus.self, from: data)
@@ -219,10 +260,26 @@ class OpenClawService {
         return result
     }
 
-    /// Run gateway health check
+    /// Run gateway health check — tries gateway RPC first, falls back to CLI
     func gatewayHealth() async -> CommandResult {
         gatewayLog = ""
-        logGateway("Running health check...")
+        
+        if let gw = gateway, gw.isConnected {
+            logGateway("Running health check via gateway WebSocket...")
+            do {
+                let payload = try await gw.health()
+                if let jsonData = try? JSONSerialization.data(withJSONObject: payload.raw, options: .prettyPrinted),
+                   let jsonStr = String(data: jsonData, encoding: .utf8) {
+                    logGateway("Health: OK")
+                    logGateway(jsonStr)
+                    return CommandResult(command: "gateway.health()", output: jsonStr, timestamp: Date(), exitCode: 0)
+                }
+            } catch {
+                logGateway("Gateway RPC failed: \(error), falling back to CLI")
+            }
+        }
+
+        logGateway("Running health check via CLI...")
         let result = await shell.run("openclaw gateway health --json")
         logGateway("Exit code: \(result.exitCode)")
         logGateway("Output: \(result.output)")
@@ -260,8 +317,40 @@ class OpenClawService {
 
     // MARK: - Sessions
 
-    /// Fetch sessions for an agent (or all agents)
+    /// Fetch sessions — tries gateway RPC first, falls back to CLI
     func fetchSessions(agent: String? = nil) async -> [AgentSession] {
+        // Try gateway first
+        if let gw = gateway, gw.isConnected {
+            do {
+                let response = try await gw.sessionsList()
+                let allSessions = response.sessions ?? []
+                let filtered: [GatewaySession]
+                if let agent {
+                    filtered = allSessions.filter { $0.agentId == agent }
+                } else {
+                    filtered = allSessions
+                }
+                return filtered.map { gs in
+                    var session = AgentSession(
+                        agentId: gs.agentId,
+                        key: gs.key,
+                        model: gs.model,
+                        sessionId: gs.sessionId,
+                        updatedAt: gs.updatedAt,
+                        kind: gs.kind
+                    )
+                    session.inputTokens = gs.inputTokens
+                    session.outputTokens = gs.outputTokens
+                    session.totalTokens = gs.totalTokens
+                    return session
+                }
+                .sorted { ($0.updatedAt ?? 0) > ($1.updatedAt ?? 0) }
+            } catch {
+                print("[Service] Gateway sessions.list failed: \(error), falling back to CLI")
+            }
+        }
+
+        // Fallback: CLI
         var cmd = "openclaw sessions --json"
         if let agent {
             cmd += " --agent \(agent)"
@@ -271,15 +360,75 @@ class OpenClawService {
         let result = await shell.run(cmd, recordHistory: false)
         if result.exitCode == 0, let data = result.output.data(using: .utf8) {
             if let response = try? JSONDecoder().decode(SessionsResponse.self, from: data) {
-                return response.sessions ?? []
+                return (response.sessions ?? []).sorted { ($0.updatedAt ?? 0) > ($1.updatedAt ?? 0) }
             }
         }
         return []
     }
 
+    /// Resolve transcript path for a given session using the session store index.
+    private func transcriptPath(for agent: String, sessionId: String) async -> String? {
+        let indexResult = await shell.run("cat ~/.openclaw/agents/\(agent)/sessions/sessions.json", recordHistory: false)
+        guard indexResult.exitCode == 0, let data = indexResult.output.data(using: .utf8) else { return nil }
+
+        if let entries = try? JSONDecoder().decode([String: SessionStoreEntry].self, from: data) {
+            if let match = entries.values.first(where: { $0.sessionId == sessionId }) {
+                return match.sessionFile ?? "~/.openclaw/agents/\(agent)/sessions/\(sessionId).jsonl"
+            }
+        }
+
+        return "~/.openclaw/agents/\(agent)/sessions/\(sessionId).jsonl"
+    }
+
+    /// Load transcript history for a stored session.
+    func loadSessionHistory(agent: String, sessionId: String) async -> [ChatMessage] {
+        guard let rawPath = await transcriptPath(for: agent, sessionId: sessionId) else { return [] }
+        let escapedPath = rawPath.replacingOccurrences(of: "\"", with: "\\\"")
+        let result = await shell.run("cat \"\(escapedPath)\"", recordHistory: false)
+        guard result.exitCode == 0 else { return [] }
+
+        let decoder = JSONDecoder()
+        let iso = ISO8601DateFormatter()
+        var messages: [ChatMessage] = []
+
+        for line in result.output.components(separatedBy: .newlines) where !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard let data = line.data(using: .utf8),
+                  let entry = try? decoder.decode(SessionTranscriptLine.self, from: data),
+                  entry.type == "message",
+                  let msg = entry.message,
+                  let role = msg.role,
+                  let content = msg.content else { continue }
+
+            let textParts = content.compactMap { part -> String? in
+                guard let type = part.type else { return nil }
+                switch type {
+                case "text":
+                    return part.text
+                default:
+                    return nil
+                }
+            }
+
+            let text = textParts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+
+            let timestamp = entry.timestamp.flatMap { iso.date(from: $0) } ?? Date()
+            let chatRole: ChatRole
+            switch role {
+            case "user": chatRole = .user
+            case "assistant": chatRole = .agent
+            default: continue
+            }
+
+            messages.append(ChatMessage(role: chatRole, content: text, timestamp: timestamp))
+        }
+
+        return messages
+    }
+
     // MARK: - Chat / Messaging
 
-    /// Send a message to an agent and get the response
+    /// Send a message to an agent and get the response (blocking)
     func sendMessage(to agent: String, message: String, sessionId: String? = nil) async -> CommandResult {
         let escaped = message.replacingOccurrences(of: "\"", with: "\\\"")
         var cmd = "openclaw agent --to \(agent) --message \"\(escaped)\""
@@ -287,6 +436,17 @@ class OpenClawService {
             cmd += " --session-id \(sessionId)"
         }
         return await shell.run(cmd)
+    }
+
+    /// Start a streaming message to an agent. Returns a StreamingProcess whose
+    /// `output` property updates in real-time as the agent responds.
+    func sendMessageStreaming(to agent: String, message: String, sessionId: String? = nil) -> StreamingProcess {
+        let escaped = message.replacingOccurrences(of: "\"", with: "\\\"")
+        var cmd = "openclaw agent --to \(agent) --message \"\(escaped)\""
+        if let sessionId, !sessionId.isEmpty {
+            cmd += " --session-id \(sessionId)"
+        }
+        return shell.startStreaming(cmd)
     }
 
     // MARK: - Workspace Files
@@ -479,13 +639,31 @@ class OpenClawService {
 
     // MARK: - Config / Settings
 
-    /// Get a config value
+    /// Get a config value — tries gateway RPC first, falls back to CLI
     func configGet(_ key: String) async -> CommandResult {
+        if let gw = gateway, gw.isConnected {
+            do {
+                let payload = try await gw.configGet(key: key)
+                let value = payload["value"]
+                let output = "\(value ?? "null")"
+                return CommandResult(command: "config.get(\(key))", output: output, timestamp: Date(), exitCode: 0)
+            } catch {
+                print("[Service] Gateway config.get failed: \(error), falling back to CLI")
+            }
+        }
         return await shell.run("openclaw config get \(key)")
     }
 
-    /// Set a config value
+    /// Set a config value — tries gateway RPC first, falls back to CLI
     func configSet(_ key: String, value: String) async -> CommandResult {
+        if let gw = gateway, gw.isConnected {
+            do {
+                _ = try await gw.configSet(key: key, value: value)
+                return CommandResult(command: "config.set(\(key))", output: "\(key) updated", timestamp: Date(), exitCode: 0)
+            } catch {
+                print("[Service] Gateway config.set failed: \(error), falling back to CLI")
+            }
+        }
         return await shell.run("openclaw config set \(key) \"\(value)\"")
     }
 
@@ -559,7 +737,8 @@ class OpenClawService {
 
     /// Access to command history from ShellService
     var commandHistory: [CommandResult] {
-        shell.commandHistory
+        get { shell.commandHistory }
+        set { shell.commandHistory = newValue }
     }
 
     var isRunningCommand: Bool {
@@ -602,16 +781,12 @@ class OpenClawService {
             if components.count >= 1 {
                 let name = components[0]
                 let workspace = components.count >= 2 ? components[1] : "~"
-
-                parsed.append(Agent(
-                    agentId: name,
-                    workspace: workspace,
-                    agentDir: nil,
-                    model: nil,
-                    bindingsCount: nil,
-                    isDefault: nil,
-                    routes: nil
-                ))
+                // Build Agent via JSON decoding to use CodingKeys
+                let json: [String: Any] = ["id": name, "workspace": workspace]
+                if let data = try? JSONSerialization.data(withJSONObject: json),
+                   let agent = try? JSONDecoder().decode(Agent.self, from: data) {
+                    parsed.append(agent)
+                }
             }
         }
 

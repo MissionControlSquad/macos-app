@@ -2,43 +2,20 @@ import SwiftUI
 
 struct SettingsView: View {
     @Bindable var service: OpenClawService
-    @State private var selectedTab = SettingsTab.global
-
-    enum SettingsTab: String, CaseIterable {
-        case global = "Global"
-        case agents = "Per-Agent"
-        case fallbacks = "Fallbacks"
-        case config = "Config"
-    }
+    var gateway: GatewayWebSocket
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Settings")
-                    .font(.title.bold())
-                Spacer()
-                Picker("", selection: $selectedTab) {
-                    ForEach(SettingsTab.allCases, id: \.self) { tab in
-                        Text(tab.rawValue).tag(tab)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 380)
-            }
-            .padding()
-
-            Divider()
-
-            switch selectedTab {
-            case .global:
-                GlobalSettingsTab(service: service)
-            case .agents:
-                AgentSettingsTab(service: service)
-            case .fallbacks:
-                FallbacksTab(service: service)
-            case .config:
-                ConfigTab(service: service)
-            }
+        TabView {
+            GlobalSettingsTab(service: service)
+                .tabItem { Label("Global", systemImage: "gearshape") }
+            AgentSettingsTab(service: service)
+                .tabItem { Label("Per-Agent", systemImage: "person.crop.circle") }
+            FallbacksTab(service: service)
+                .tabItem { Label("Fallbacks", systemImage: "arrow.triangle.branch") }
+            ConfigTab(service: service)
+                .tabItem { Label("Config", systemImage: "wrench") }
+            AdvancedTab(service: service, gateway: gateway)
+                .tabItem { Label("Advanced", systemImage: "slider.horizontal.3") }
         }
     }
 }
@@ -50,46 +27,28 @@ private struct GlobalSettingsTab: View {
     @State private var defaultModel = ""
     @State private var providerName = ""
     @State private var apiKey = ""
-    @State private var result = ""
-    @State private var isError = false
+    @State private var toast = ToastState()
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                // Current status
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Model Configuration")
-                        .font(.headline)
+        Form {
+            Section("Model Configuration") {
+                LabeledContent("Default Model") {
+                    Text(service.modelsStatus?.defaultModel ?? "Not set")
+                        .font(.system(.body, design: .monospaced))
+                }
 
-                    HStack {
-                        Text("Default Model:")
-                            .foregroundStyle(.secondary)
-                            .frame(width: 120, alignment: .trailing)
-                        Text(service.modelsStatus?.defaultModel ?? "Not set")
-                            .font(.system(.body, design: .monospaced))
-                    }
+                LabeledContent("Fallback Models") {
+                    Text(service.modelsStatus?.fallbacks?.joined(separator: ", ") ?? "Not set")
+                        .font(.system(.body, design: .monospaced))
+                }
 
-                    HStack {
-                        Text("Fallback Models:")
-                            .foregroundStyle(.secondary)
-                            .frame(width: 120, alignment: .trailing)
-                        Text(service.modelsStatus?.fallbacks?.joined(separator: ", ") ?? "Not set")
-                            .font(.system(.body, design: .monospaced))
-                    }
-
-                    Divider()
-
-                    // Set default model
-                    HStack {
-                        Text("Set Default:")
-                            .foregroundStyle(.secondary)
-                            .frame(width: 120, alignment: .trailing)
+                LabeledContent("Set Default") {
+                    HStack(spacing: 8) {
                         ModelCatalogPicker(selection: $defaultModel)
                         Button("Apply") {
                             Task {
                                 let r = await service.setDefaultModel(defaultModel)
-                                result = r.exitCode == 0 ? "Default model updated" : r.output
-                                isError = r.exitCode != 0
+                                toast.show(r.exitCode == 0 ? "Default model updated" : r.output, isError: r.exitCode != 0)
                                 if r.exitCode == 0 { defaultModel = "" }
                             }
                         }
@@ -97,135 +56,87 @@ private struct GlobalSettingsTab: View {
                         .disabled(defaultModel.isEmpty)
                     }
                 }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
 
-                // Provider auth
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Provider Authentication")
-                        .font(.headline)
-
-                    Text("Configure API keys for model providers. These apply globally to all agents unless overridden per-agent.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-
-                    // Provider list
-                    if let providers = service.modelsStatus?.providers, !providers.isEmpty {
-                        ForEach(providers) { provider in
-                            HStack(spacing: 10) {
-                                Image(systemName: provider.authenticated == true ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                    .foregroundStyle(provider.authenticated == true ? .green : .red)
-                                Text(provider.name)
-                                    .font(.body.weight(.medium))
-                                Spacer()
-                                if provider.authenticated == true {
-                                    Text("Authenticated")
-                                        .font(.caption)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 3)
-                                        .background(Color.green.opacity(0.15))
-                                        .foregroundStyle(.green)
-                                        .clipShape(Capsule())
-                                } else {
-                                    Button("Configure") {
-                                        providerName = provider.name
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.small)
+            Section {
+                if let providers = service.modelsStatus?.providers, !providers.isEmpty {
+                    ForEach(providers) { provider in
+                        LabeledContent(provider.name) {
+                            if provider.authenticated == true {
+                                StatusBadge(label: "Authenticated", color: .green)
+                            } else {
+                                Button("Configure") {
+                                    providerName = provider.name
                                 }
-                            }
-                            .padding(8)
-                            .background(Color(.textBackgroundColor))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                        }
-                    }
-
-                    Divider()
-
-                    // Add API key
-                    Text("Add / Update API Key")
-                        .font(.subheadline.weight(.medium))
-
-                    HStack(spacing: 8) {
-                        ProviderSelectionPicker(selection: $providerName)
-
-                        SecureField("API Key", text: $apiKey)
-                            .textFieldStyle(.roundedBorder)
-
-                        Button("Save") {
-                            Task {
-                                let r = await service.configureProvider(provider: providerName, apiKey: apiKey)
-                                result = r.exitCode == 0
-                                    ? "\(providerName) API key saved"
-                                    : r.output
-                                isError = r.exitCode != 0
-                                if r.exitCode == 0 { apiKey = "" }
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(providerName.isEmpty || apiKey.isEmpty)
-                    }
-
-                    // Environment variable hint
-                    DisclosureGroup("Alternative: Environment Variables") {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("You can also set API keys via environment variables in ~/.openclaw/.env:")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text("ANTHROPIC_API_KEY=sk-ant-...\nOPENAI_API_KEY=sk-...\nGOOGLE_API_KEY=...")
-                                .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
-                                .padding(8)
-                                .background(Color(.textBackgroundColor))
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                        }
-                        .padding(.top, 4)
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-
-                // Model catalog summary
-                let catalog = ModelCatalogStore.shared
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Model Catalog")
-                            .font(.headline)
-                        Spacer()
-                        Text("\(catalog.models.count) models, \(catalog.providers.count) providers")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if catalog.isLoading {
-                            ProgressView()
+                                .buttonStyle(.bordered)
                                 .controlSize(.small)
+                            }
                         }
-                        Button {
-                            catalog.refresh()
-                        } label: {
-                            Label("Refresh", systemImage: "arrow.clockwise")
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
                     }
                 }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+            } header: {
+                Text("Provider Authentication")
+            } footer: {
+                Text("Configure API keys for model providers. These apply globally to all agents unless overridden per-agent.")
+            }
 
-                // Result
-                if !result.isEmpty {
-                    resultBanner(result, isError: isError)
+            Section("Add / Update API Key") {
+                LabeledContent("Provider") {
+                    ProviderSelectionPicker(selection: $providerName)
+                }
+
+                LabeledContent("API Key") {
+                    SecureField("API Key", text: $apiKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                HStack {
+                    Spacer()
+                    Button("Save") {
+                        Task {
+                            let r = await service.configureProvider(provider: providerName, apiKey: apiKey)
+                            toast.show(r.exitCode == 0 ? "\(providerName) API key saved" : r.output, isError: r.exitCode != 0)
+                            if r.exitCode == 0 { apiKey = "" }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(providerName.isEmpty || apiKey.isEmpty)
+                }
+
+                DisclosureGroup("Alternative: Environment Variables") {
+                    Text("Set API keys via environment variables in ~/.openclaw/.env:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("ANTHROPIC_API_KEY=sk-ant-...\nOPENAI_API_KEY=sk-...\nGOOGLE_API_KEY=...")
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
                 }
             }
-            .padding()
+
+            Section("Model Catalog") {
+                let catalog = ModelCatalogStore.shared
+                LabeledContent("Models") {
+                    Text("\(catalog.models.count) models, \(catalog.providers.count) providers")
+                }
+                HStack {
+                    Spacer()
+                    if catalog.isLoading {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Button {
+                        catalog.refresh()
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+
+            ToastBanner(toast: toast)
         }
+        .formStyle(.grouped)
         .task {
             await service.fetchModelsStatus()
         }
@@ -240,10 +151,16 @@ private struct AgentSettingsTab: View {
     @State private var agentModel = ""
     @State private var agentProvider = ""
     @State private var agentApiKey = ""
-    @State private var result = ""
-    @State private var isError = false
+    @State private var toast = ToastState()
 
     var body: some View {
+        if service.agents.isEmpty {
+            EmptyStateView(
+                icon: "person.3",
+                title: "No Agents",
+                message: "Create an agent first to configure per-agent settings."
+            )
+        } else {
         HSplitView {
             // Agent list
             List(service.agents, selection: $selectedAgent) { agent in
@@ -262,7 +179,7 @@ private struct AgentSettingsTab: View {
                                 .font(.callout.weight(.medium))
                             Text(agent.name)
                                 .font(.caption2)
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
                         }
                     }
                 }
@@ -294,92 +211,73 @@ private struct AgentSettingsTab: View {
                                     .foregroundStyle(.secondary)
                                 Text("Workspace: \(agent.workspace)")
                                     .font(.caption)
-                                    .foregroundStyle(.tertiary)
+                                    .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
                             }
                         }
 
                         Divider()
 
                         // Per-agent model
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Model Override")
-                                .font(.headline)
+                        GroupBox("Model Override") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Set a specific model for this agent. Leave empty to use the global default.")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
 
-                            Text("Set a specific model for this agent. Leave empty to use the global default.")
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
+                                HStack {
+                                    ModelCatalogPicker(
+                                        selection: $agentModel,
+                                        placeholder: "Use global default"
+                                    )
 
-                            HStack {
-                                ModelCatalogPicker(
-                                    selection: $agentModel,
-                                    placeholder: "Use global default"
-                                )
-
-                                Button("Apply") {
-                                    Task {
-                                        let r = await service.setAgentModel(agent: agent.name, model: agentModel)
-                                        result = r.exitCode == 0
-                                            ? "Model set for \(agent.name)"
-                                            : r.output
-                                        isError = r.exitCode != 0
+                                    Button("Apply") {
+                                        Task {
+                                            let r = await service.setAgentModel(agent: agent.name, model: agentModel)
+                                            toast.show(r.exitCode == 0 ? "Model set for \(agent.name)" : r.output, isError: r.exitCode != 0)
+                                        }
                                     }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(agentModel.isEmpty)
                                 }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(agentModel.isEmpty)
                             }
                         }
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color(.controlBackgroundColor))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
 
                         // Per-agent auth
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Agent API Key")
-                                .font(.headline)
+                        GroupBox("Agent API Key") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Configure a provider API key specifically for this agent. This overrides the global key.")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
 
-                            Text("Configure a provider API key specifically for this agent. This overrides the global key.")
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
+                                HStack(spacing: 8) {
+                                    ProviderSelectionPicker(selection: $agentProvider)
 
-                            HStack(spacing: 8) {
-                                ProviderSelectionPicker(selection: $agentProvider)
+                                    SecureField("API Key", text: $agentApiKey)
+                                        .textFieldStyle(.roundedBorder)
 
-                                SecureField("API Key", text: $agentApiKey)
-                                    .textFieldStyle(.roundedBorder)
-
-                                Button("Save") {
-                                    Task {
-                                        let r = await service.configureAgentAuth(
-                                            agent: agent.name,
-                                            provider: agentProvider,
-                                            apiKey: agentApiKey
-                                        )
-                                        result = r.exitCode == 0
-                                            ? "\(agentProvider) key saved for \(agent.name)"
-                                            : r.output
-                                        isError = r.exitCode != 0
-                                        if r.exitCode == 0 { agentApiKey = "" }
+                                    Button("Save") {
+                                        Task {
+                                            let r = await service.configureAgentAuth(
+                                                agent: agent.name,
+                                                provider: agentProvider,
+                                                apiKey: agentApiKey
+                                            )
+                                            toast.show(r.exitCode == 0 ? "\(agentProvider) key saved for \(agent.name)" : r.output, isError: r.exitCode != 0)
+                                            if r.exitCode == 0 { agentApiKey = "" }
+                                        }
                                     }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(agentProvider.isEmpty || agentApiKey.isEmpty)
                                 }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(agentProvider.isEmpty || agentApiKey.isEmpty)
-                            }
 
-                            Text("Auth store: ~/.openclaw/agents/\(agent.name)/agent/auth-profiles.json")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
+                                Text("Auth store: ~/.openclaw/agents/\(agent.name)/agent/auth-profiles.json")
+                                    .font(.caption2)
+                                    .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                            }
                         }
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color(.controlBackgroundColor))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
 
                         // Agent config info
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Agent Configuration")
-                                .font(.headline)
-
+                        GroupBox("Agent Configuration") {
                             VStack(alignment: .leading, spacing: 4) {
                                 configRow("Agent ID", agent.name)
                                 configRow("Workspace", agent.workspace)
@@ -395,23 +293,17 @@ private struct AgentSettingsTab: View {
                                 }
                             }
                         }
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color(.controlBackgroundColor))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
 
-                        if !result.isEmpty {
-                            resultBanner(result, isError: isError)
-                        }
+                        ToastBanner(toast: toast)
                     }
                     .padding()
                 }
             } else {
-                ContentUnavailableView {
-                    Label("Select an Agent", systemImage: "person.circle")
-                } description: {
-                    Text("Choose an agent from the list to configure its model and API keys.")
-                }
+                EmptyStateView(
+                    icon: "person.circle",
+                    title: "Select an Agent",
+                    message: "Choose an agent from the list to configure its model and API keys."
+                )
             }
         }
         .task {
@@ -419,6 +311,7 @@ private struct AgentSettingsTab: View {
                 await service.fetchAgents()
             }
         }
+        } // else (agents not empty)
     }
 
     private func configRow(_ label: String, _ value: String) -> some View {
@@ -440,85 +333,69 @@ private struct FallbacksTab: View {
     @Bindable var service: OpenClawService
     @State private var fallbacksOutput = ""
     @State private var newFallback = ""
-    @State private var result = ""
-    @State private var isError = false
+    @State private var toast = ToastState()
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("Fallback Chain")
-                            .font(.headline)
-                        Spacer()
-                        Button {
-                            Task { await refresh() }
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-
-                    Text("When the primary model fails, OpenClaw tries fallback models in order.")
-                        .font(.callout)
+        Form {
+            Section {
+                if fallbacksOutput.isEmpty {
+                    Text("No fallbacks configured.")
                         .foregroundStyle(.secondary)
-
-                    if fallbacksOutput.isEmpty {
-                        Text("No fallbacks configured.")
-                            .foregroundStyle(.tertiary)
-                            .font(.callout)
-                    } else {
-                        Text(fallbacksOutput)
-                            .font(.system(.body, design: .monospaced))
-                            .textSelection(.enabled)
-                            .padding(10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(.textBackgroundColor))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                } else {
+                    Text(fallbacksOutput)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            } header: {
+                HStack {
+                    Text("Fallback Chain")
+                    Spacer()
+                    Button {
+                        Task { await refresh() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
                     }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            } footer: {
+                Text("When the primary model fails, OpenClaw tries fallback models in order.")
+            }
 
-                    Divider()
+            Section("Add Fallback") {
+                LabeledContent("Model") {
+                    ModelCatalogPicker(selection: $newFallback)
+                }
 
-                    HStack {
-                        ModelCatalogPicker(selection: $newFallback)
-
-                        Button("Add Fallback") {
-                            Task {
-                                let r = await service.addFallback(model: newFallback)
-                                result = r.exitCode == 0 ? "Fallback added" : r.output
-                                isError = r.exitCode != 0
-                                if r.exitCode == 0 {
-                                    newFallback = ""
-                                    await refresh()
-                                }
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(newFallback.isEmpty)
-
-                        Button("Clear All") {
-                            Task {
-                                let r = await service.runCommand("openclaw models fallbacks clear")
-                                result = r.exitCode == 0 ? "All fallbacks cleared" : r.output
-                                isError = r.exitCode != 0
+                HStack {
+                    Spacer()
+                    Button("Add Fallback") {
+                        Task {
+                            let r = await service.addFallback(model: newFallback)
+                            toast.show(r.exitCode == 0 ? "Fallback added" : r.output, isError: r.exitCode != 0)
+                            if r.exitCode == 0 {
+                                newFallback = ""
                                 await refresh()
                             }
                         }
-                        .buttonStyle(.bordered)
                     }
-                }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .buttonStyle(.borderedProminent)
+                    .disabled(newFallback.isEmpty)
 
-                if !result.isEmpty {
-                    resultBanner(result, isError: isError)
+                    Button("Clear All") {
+                        Task {
+                            let r = await service.runCommand("openclaw models fallbacks clear")
+                            toast.show(r.exitCode == 0 ? "All fallbacks cleared" : r.output, isError: r.exitCode != 0)
+                            await refresh()
+                        }
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
-            .padding()
+
+            ToastBanner(toast: toast)
         }
+        .formStyle(.grouped)
         .task {
             await refresh()
         }
@@ -537,183 +414,195 @@ private struct ConfigTab: View {
     @State private var configKey = ""
     @State private var configValue = ""
     @State private var configOutput = ""
-    @State private var result = ""
-    @State private var isError = false
+    @State private var toast = ToastState()
     @State private var doctorOutput = ""
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                // Config get/set
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Configuration")
-                        .font(.headline)
+        Form {
+            Section {
+                LabeledContent("Key") {
+                    TextField("e.g. gateway.mode", text: $configKey)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                }
 
-                    Text("Read and write OpenClaw config values using dot-path notation.")
-                        .font(.callout)
+                LabeledContent("Value") {
+                    TextField("Leave empty to read", text: $configValue)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                }
+
+                HStack {
+                    Spacer()
+                    Button("Get") {
+                        Task {
+                            let r = await service.configGet(configKey)
+                            configOutput = r.output
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(configKey.isEmpty)
+
+                    Button("Set") {
+                        Task {
+                            let r = await service.configSet(configKey, value: configValue)
+                            toast.show(r.exitCode == 0 ? "\(configKey) updated" : r.output, isError: r.exitCode != 0)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(configKey.isEmpty || configValue.isEmpty)
+                }
+
+                HStack(spacing: 6) {
+                    Text("Common keys:")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
-
-                    HStack(spacing: 8) {
-                        TextField("Key (e.g. gateway.mode)", text: $configKey)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(.body, design: .monospaced))
-                            .frame(minWidth: 200)
-
-                        TextField("Value (leave empty to read)", text: $configValue)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(.body, design: .monospaced))
-
-                        Button("Get") {
-                            Task {
-                                let r = await service.configGet(configKey)
-                                configOutput = r.output
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(configKey.isEmpty)
-
-                        Button("Set") {
-                            Task {
-                                let r = await service.configSet(configKey, value: configValue)
-                                result = r.exitCode == 0 ? "\(configKey) updated" : r.output
-                                isError = r.exitCode != 0
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(configKey.isEmpty || configValue.isEmpty)
+                    ForEach([
+                        "gateway.mode",
+                        "gateway.port",
+                        "agents.defaults.model.primary",
+                        "session.dmScope",
+                    ], id: \.self) { key in
+                        Button(key) { configKey = key }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
                     }
+                }
 
-                    // Common config keys
-                    HStack(spacing: 6) {
-                        Text("Common keys:")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                        ForEach([
-                            "gateway.mode",
-                            "gateway.port",
-                            "agents.defaults.model.primary",
-                            "session.dmScope",
-                        ], id: \.self) { key in
-                            Button(key) { configKey = key }
-                                .buttonStyle(.bordered)
-                                .controlSize(.mini)
+                if !configOutput.isEmpty {
+                    Text(configOutput)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            } header: {
+                Text("Configuration")
+            } footer: {
+                Text("Read and write OpenClaw config values using dot-path notation.")
+            }
+
+            Section("Diagnostics") {
+                HStack {
+                    Button {
+                        Task {
+                            let r = await service.runDoctor()
+                            doctorOutput = r.output
                         }
+                    } label: {
+                        Label("Run Doctor", systemImage: "stethoscope")
                     }
+                    .buttonStyle(.bordered)
 
-                    if !configOutput.isEmpty {
-                        Text(configOutput)
-                            .font(.system(.body, design: .monospaced))
-                            .textSelection(.enabled)
-                            .padding(10)
+                    Button {
+                        Task {
+                            let r = await service.configValidate()
+                            doctorOutput = r.output
+                        }
+                    } label: {
+                        Label("Validate Config", systemImage: "checkmark.shield")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        Task {
+                            let r = await service.runCommand("openclaw doctor --repair")
+                            doctorOutput = r.output
+                        }
+                    } label: {
+                        Label("Auto-Fix", systemImage: "wrench.and.screwdriver")
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                if !doctorOutput.isEmpty {
+                    ScrollView {
+                        Text(doctorOutput)
+                            .font(.system(.caption, design: .monospaced))
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(.textBackgroundColor))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .textSelection(.enabled)
                     }
+                    .frame(maxHeight: 300)
                 }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
 
-                // Diagnostics
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("Diagnostics")
-                            .font(.headline)
-                        Spacer()
-                        Button {
-                            Task {
-                                let r = await service.runDoctor()
-                                doctorOutput = r.output
-                            }
-                        } label: {
-                            Label("Run Doctor", systemImage: "stethoscope")
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-
-                        Button {
-                            Task {
-                                let r = await service.configValidate()
-                                doctorOutput = r.output
-                            }
-                        } label: {
-                            Label("Validate Config", systemImage: "checkmark.shield")
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-
-                        Button {
-                            Task {
-                                let r = await service.runCommand("openclaw doctor --repair")
-                                doctorOutput = r.output
-                            }
-                        } label: {
-                            Label("Auto-Fix", systemImage: "wrench.and.screwdriver")
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-
-                    if !doctorOutput.isEmpty {
-                        ScrollView {
-                            Text(doctorOutput)
-                                .font(.system(.caption, design: .monospaced))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                        }
-                        .frame(maxHeight: 300)
-                        .padding(10)
-                        .background(Color(.textBackgroundColor))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                    }
-                }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-
-                // Config file path
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Config File")
-                        .font(.headline)
+            Section("Config File") {
+                LabeledContent("Path") {
                     Text("~/.openclaw/openclaw.json")
                         .font(.system(.body, design: .monospaced))
                         .textSelection(.enabled)
-
-                    Button("Open in Finder") {
-                        let home = FileManager.default.homeDirectoryForCurrentUser.path
-                        let url = URL(fileURLWithPath: "\(home)/.openclaw/openclaw.json")
-                        NSWorkspace.shared.activateFileViewerSelecting([url])
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                 }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
 
-                if !result.isEmpty {
-                    resultBanner(result, isError: isError)
+                Button("Open in Finder") {
+                    let home = FileManager.default.homeDirectoryForCurrentUser.path
+                    let url = URL(fileURLWithPath: "\(home)/.openclaw/openclaw.json")
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
+                .buttonStyle(.bordered)
+            }
+
+            ToastBanner(toast: toast)
+        }
+        .formStyle(.grouped)
+    }
+}
+
+// MARK: - Advanced Tab
+
+private struct AdvancedTab: View {
+    @Bindable var service: OpenClawService
+    var gateway: GatewayWebSocket
+    @State private var selectedSection = AdvancedSection.channels
+
+    enum AdvancedSection: String, CaseIterable {
+        case channels = "Channels"
+        case memory = "Memory"
+        case skills = "Skills & Plugins"
+        case tools = "Tools"
+        case automation = "Automation"
+        case hooks = "Hooks"
+        case approvals = "Approvals"
+        case devices = "Devices"
+        case usage = "Usage & Cost"
+        case terminal = "Terminal"
+    }
+
+    var body: some View {
+        HSplitView {
+            // Section list
+            List(AdvancedSection.allCases, id: \.self, selection: $selectedSection) { section in
+                Text(section.rawValue)
+                    .tag(section)
+            }
+            .listStyle(.sidebar)
+            .frame(minWidth: 140, maxWidth: 180)
+
+            // Content
+            Group {
+                switch selectedSection {
+                case .channels:
+                    ChannelsView(service: service)
+                case .memory:
+                    MemoryView(service: service)
+                case .skills:
+                    SkillsPluginsView(service: service)
+                case .tools:
+                    ToolsCatalogView(gateway: gateway)
+                case .automation:
+                    CronView(service: service, gateway: gateway)
+                case .hooks:
+                    HooksView(service: service)
+                case .approvals:
+                    ApprovalsView(gateway: gateway)
+                case .devices:
+                    DevicesView(gateway: gateway)
+                case .usage:
+                    UsageCostView(gateway: gateway, service: service)
+                case .terminal:
+                    TerminalView(service: service)
                 }
             }
-            .padding()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
 
-// MARK: - Shared Helpers
 
-private func resultBanner(_ text: String, isError: Bool) -> some View {
-    HStack(spacing: 6) {
-        Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-        Text(text)
-    }
-    .font(.callout)
-    .foregroundStyle(isError ? .red : .green)
-    .padding()
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .background((isError ? Color.red : Color.green).opacity(0.1))
-    .clipShape(RoundedRectangle(cornerRadius: 10))
-}

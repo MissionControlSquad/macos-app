@@ -51,95 +51,73 @@ struct ModelsConfigView: View {
     @State private var fallbackModel = ""
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Model Providers")
-                    .font(.title.bold())
-                Spacer()
-            }
-            .padding()
+        Form {
+            Section {
+                Text("Configure your AI provider credentials. Keys are stored locally by OpenClaw.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
 
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    // Provider Cards
-                    Section {
-                        Text("API Keys")
-                            .font(.headline)
-                        Text("Configure your AI provider credentials. Keys are stored locally by OpenClaw.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-
-                        ForEach(providers) { provider in
-                            providerCard(provider)
-                        }
-                    }
-
-                    Divider()
-
-                    // Default Model Config
-                    Section {
-                        Text("Default Models")
-                            .font(.headline)
-                        Text("Set the primary and fallback models for your agents.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack {
-                                Text("Primary:")
-                                    .frame(width: 70, alignment: .trailing)
-                                TextField("e.g. anthropic/claude-sonnet-4-6", text: $defaultModel)
-                                    .textFieldStyle(.roundedBorder)
-                                Button("Set") {
-                                    Task {
-                                        let result = await shell.run(
-                                            "openclaw config set default-model \"\(defaultModel)\""
-                                        )
-                                        resultMessage = result.exitCode == 0
-                                            ? "Default model set!" : result.output
-                                        resultIsError = result.exitCode != 0
-                                    }
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(defaultModel.isEmpty)
-                            }
-
-                            HStack {
-                                Text("Fallback:")
-                                    .frame(width: 70, alignment: .trailing)
-                                TextField("e.g. openai/gpt-5.1-codex", text: $fallbackModel)
-                                    .textFieldStyle(.roundedBorder)
-                                Button("Set") {
-                                    Task {
-                                        let result = await shell.run(
-                                            "openclaw config set fallback-model \"\(fallbackModel)\""
-                                        )
-                                        resultMessage = result.exitCode == 0
-                                            ? "Fallback model set!" : result.output
-                                        resultIsError = result.exitCode != 0
-                                    }
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(fallbackModel.isEmpty)
-                            }
-                        }
-                        .padding()
-                        .background(Color(.controlBackgroundColor))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-
-                    if !resultMessage.isEmpty {
-                        Text(resultMessage)
-                            .font(.callout)
-                            .foregroundStyle(resultIsError ? .red : .green)
-                            .padding(.top, 4)
-                    }
+                ForEach(providers) { provider in
+                    providerCard(provider)
                 }
-                .padding()
+            } header: {
+                Text("API Keys")
+            }
+
+            Section {
+                Text("Set the primary and fallback models for your agents.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    Text("Primary:")
+                        .frame(width: 70, alignment: .trailing)
+                    TextField("e.g. anthropic/claude-sonnet-4-6", text: $defaultModel)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Set") {
+                        Task {
+                            let result = await shell.run(
+                                "openclaw models set \"\(defaultModel)\""
+                            )
+                            resultMessage = result.exitCode == 0
+                                ? "Default model set!" : result.output
+                            resultIsError = result.exitCode != 0
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(defaultModel.isEmpty)
+                }
+
+                HStack {
+                    Text("Fallback:")
+                        .frame(width: 70, alignment: .trailing)
+                    TextField("e.g. openai/gpt-5.1-codex", text: $fallbackModel)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Set") {
+                        Task {
+                            let result = await shell.run(
+                                "openclaw models fallbacks add \"\(fallbackModel)\""
+                            )
+                            resultMessage = result.exitCode == 0
+                                ? "Fallback model set!" : result.output
+                            resultIsError = result.exitCode != 0
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(fallbackModel.isEmpty)
+                }
+            } header: {
+                Text("Default Models")
+            }
+
+            if !resultMessage.isEmpty {
+                Text(resultMessage)
+                    .font(.callout)
+                    .foregroundStyle(resultIsError ? Color.red : Color.green)
             }
         }
+        .formStyle(.grouped)
+        .navigationTitle("Model Providers")
         .sheet(item: $selectedProvider) { provider in
             apiKeySheet(provider)
         }
@@ -169,32 +147,36 @@ struct ModelsConfigView: View {
             }
             .buttonStyle(.bordered)
         }
-        .padding(12)
-        .background(Color(.controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - API Key Sheet
 
     private func apiKeySheet(_ provider: ModelProvider) -> some View {
-        VStack(spacing: 16) {
-            Text("Configure \(provider.name)")
-                .font(.title2.bold())
+        VStack(spacing: 0) {
+            Form {
+                Section {
+                    Text("Paste your \(provider.name) API key below. It will be stored locally by OpenClaw and never sent anywhere except to the provider.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
 
-            Text("Paste your \(provider.name) API key below. It will be stored locally by OpenClaw and never sent anywhere except to the provider.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+                    SecureField("API Key", text: $apiKey)
+                }
 
-            SecureField("API Key", text: $apiKey)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 400)
+                if !resultMessage.isEmpty {
+                    Text(resultMessage)
+                        .font(.caption)
+                        .foregroundStyle(resultIsError ? Color.red : Color.green)
+                }
+            }
+            .formStyle(.grouped)
 
             HStack {
                 Button("Cancel") {
                     selectedProvider = nil
                 }
-                .buttonStyle(.bordered)
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
 
                 Button {
                     Task { await saveApiKey(provider) }
@@ -208,17 +190,13 @@ struct ModelsConfigView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
                 .disabled(apiKey.isEmpty || isSaving)
             }
-
-            if !resultMessage.isEmpty {
-                Text(resultMessage)
-                    .font(.caption)
-                    .foregroundStyle(resultIsError ? .red : .green)
-            }
+            .padding()
         }
-        .padding(24)
-        .frame(width: 500)
+        .navigationTitle("Configure \(provider.name)")
+        .frame(width: 460, height: 280)
     }
 
     private func saveApiKey(_ provider: ModelProvider) async {
@@ -244,4 +222,5 @@ struct ModelsConfigView: View {
 
 #Preview {
     ModelsConfigView()
+        .frame(width: 600, height: 500)
 }

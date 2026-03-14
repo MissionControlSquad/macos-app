@@ -12,41 +12,27 @@ struct SetupView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Setup")
-                    .font(.title.bold())
-                Spacer()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                prerequisitesSection
+                Divider()
+                installSection
+                Divider()
+                initSection
+                if !installLog.isEmpty {
+                    Divider()
+                    logSection
+                }
+            }
+            .padding()
+        }
+        .navigationTitle("Setup")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
                 if installStatus == .checking || installStatus == .installing {
                     ProgressView()
                         .controlSize(.small)
                 }
-            }
-            .padding()
-
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    // Prerequisites
-                    prerequisitesSection
-
-                    Divider()
-
-                    // Install OpenClaw
-                    installSection
-
-                    Divider()
-
-                    // Initialize Project
-                    initSection
-
-                    if !installLog.isEmpty {
-                        Divider()
-                        logSection
-                    }
-                }
-                .padding()
             }
         }
         .task {
@@ -57,47 +43,41 @@ struct SetupView: View {
     // MARK: - Prerequisites
 
     private var prerequisitesSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Prerequisites")
-                .font(.headline)
-
-            HStack(spacing: 8) {
-                Image(systemName: nodeInstalled ? "checkmark.circle.fill" : "xmark.circle.fill")
-                    .foregroundStyle(nodeInstalled ? .green : .red)
-                Text("Node.js 22+")
-                    .font(.body)
-                Spacer()
-                if !nodeInstalled {
-                    Button("Install with Homebrew") {
-                        Task {
-                            appendLog("Installing Node.js via Homebrew...")
-                            let result = await shell.run("brew install node")
-                            appendLog(result.output)
-                            await checkPrerequisites()
+        GroupBox("Prerequisites") {
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: nodeInstalled ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(nodeInstalled ? Color.green : Color.red)
+                    Text("Node.js 22+")
+                    Spacer()
+                    if !nodeInstalled {
+                        Button("Install with Homebrew") {
+                            Task {
+                                appendLog("Installing Node.js via Homebrew...")
+                                let result = await shell.run("brew install node")
+                                appendLog(result.output)
+                                await checkPrerequisites()
+                            }
                         }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                     }
-                    .buttonStyle(.bordered)
                 }
-            }
-            .padding(10)
-            .background(Color(.controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
 
-            HStack(spacing: 8) {
-                Image(systemName: openclawInstalled ? "checkmark.circle.fill" : "xmark.circle.fill")
-                    .foregroundStyle(openclawInstalled ? .green : .red)
-                Text("OpenClaw CLI")
-                    .font(.body)
-                Spacer()
-                if openclawInstalled {
-                    Text("Installed")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                Divider()
+
+                HStack(spacing: 8) {
+                    Image(systemName: openclawInstalled ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(openclawInstalled ? Color.green : Color.red)
+                    Text("OpenClaw CLI")
+                    Spacer()
+                    if openclawInstalled {
+                        Text("Installed")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
-            .padding(10)
-            .background(Color(.controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
         }
     }
 
@@ -116,7 +96,7 @@ struct SetupView: View {
                 Text("npx openclaw@latest")
                     .font(.system(.body, design: .monospaced))
                     .padding(8)
-                    .background(Color.black.opacity(0.1))
+                    .background(.quinary)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
 
                 Spacer()
@@ -136,7 +116,7 @@ struct SetupView: View {
             if installStatus == .failed {
                 Text("Installation failed. Check the log below for details.")
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Color.red)
             }
         }
     }
@@ -177,16 +157,7 @@ struct SetupView: View {
     // MARK: - Log
 
     private var logSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Log")
-                    .font(.headline)
-                Spacer()
-                Button("Clear") { installLog = "" }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-            }
-
+        GroupBox {
             ScrollView {
                 Text(installLog)
                     .font(.system(.caption, design: .monospaced))
@@ -194,9 +165,14 @@ struct SetupView: View {
                     .textSelection(.enabled)
             }
             .frame(maxHeight: 200)
-            .padding(8)
-            .background(Color.black.opacity(0.05))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+        } label: {
+            HStack {
+                Text("Log")
+                Spacer()
+                Button("Clear") { installLog = "" }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+            }
         }
     }
 

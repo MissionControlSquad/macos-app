@@ -19,25 +19,41 @@ enum AgentTab: String, CaseIterable {
 struct AgentDetailView: View {
     let agent: Agent
     @Bindable var service: OpenClawService
+    var initialSessionId: String? = nil
     @State private var selectedTab: AgentTab = .chat
+
+    // Gateway WebSocket
+    @State private var gateway = GatewayWebSocket()
 
     // Chat state
     @State private var messageText = ""
     @State private var chatMessages: [ChatMessage] = []
     @State private var isSending = false
+    @State private var streamingProcess: StreamingProcess?
+    @State private var activeSessionKey: String?
+    @State private var slashCommandResult: String?
 
     // Files state
     @State private var workspaceFiles: [WorkspaceFile] = []
     @State private var selectedFileContent: String?
     @State private var selectedFileName: String?
+    @State private var currentDirectory: String = "" // relative path within workspace
+    @State private var isLoadingFiles = false
 
     // Sessions state
     @State private var sessions: [AgentSession] = []
+    @State private var selectedSession: AgentSession?
+    @State private var activeSessionId: String?
+    @State private var isLoadingHistory = false
+    @State private var isLoadingSessions = true
+
+    // Confirmation dialogs
+    @State private var showDeleteConfirm = false
+    @State private var showRestartGatewayConfirm = false
+    @State private var toast = ToastState()
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider()
             tabBar
             Divider()
 
@@ -52,81 +68,67 @@ struct AgentDetailView: View {
                 infoView
             }
         }
+        .navigationTitle(agent.displayName ?? agent.name)
+        .navigationSubtitle(agent.agentStatus.label)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                StatusBadge(label: agent.agentStatus.label, color: agentColor(agent.agentStatus))
+            }
+        }
+        .toastOverlay(toast)
+        .confirmationDialog(
+            "Delete Agent",
+            isPresented: $showDeleteConfirm
+        ) {
+            Button("Delete \"\(agent.displayName ?? agent.name)\"", role: .destructive) {
+                Task {
+                    let result = await service.deleteAgent(name: agent.name)
+                    if result.exitCode == 0 {
+                        toast.show("Agent \"\(agent.displayName ?? agent.name)\" deleted")
+                    } else {
+                        toast.show("Failed to delete agent: \(result.output)", isError: true)
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will permanently remove \"\(agent.displayName ?? agent.name)\" and its configuration. This action cannot be undone.")
+        }
+        .confirmationDialog(
+            "Restart Gateway",
+            isPresented: $showRestartGatewayConfirm
+        ) {
+            Button("Restart Gateway", role: .destructive) {
+                Task {
+                    let result = await service.runCommand("openclaw gateway restart")
+                    if result.exitCode == 0 {
+                        toast.show("Gateway restarted successfully")
+                    } else {
+                        toast.show("Gateway restart failed: \(result.output)", isError: true)
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Restarting the gateway will briefly disconnect all active sessions. Continue?")
+        }
         .task {
             await loadData()
         }
     }
 
-    // MARK: - Header
-
-    private var header: some View {
-        HStack(spacing: 12) {
-            if let emoji = agent.emoji, !emoji.isEmpty {
-                Text(emoji)
-                    .font(.largeTitle)
-            } else {
-                Image(systemName: agent.agentStatus.icon)
-                    .font(.title)
-                    .foregroundStyle(agentColor(agent.agentStatus))
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(agent.displayName ?? agent.name)
-                        .font(.title2.bold())
-                    if agent.isDefault == true {
-                        Text("Default")
-                            .font(.caption2)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.green.opacity(0.15))
-                            .foregroundStyle(.green)
-                            .clipShape(Capsule())
-                    }
-                }
-                Text(agent.workspace)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            Text(agent.agentStatus.label)
-                .font(.callout)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(agentColor(agent.agentStatus).opacity(0.15))
-                .foregroundStyle(agentColor(agent.agentStatus))
-                .clipShape(Capsule())
-        }
-        .padding()
-    }
-
     // MARK: - Tab Bar
 
     private var tabBar: some View {
-        HStack(spacing: 0) {
+        Picker("Tab", selection: $selectedTab) {
             ForEach(AgentTab.allCases, id: \.self) { tab in
-                Button {
-                    selectedTab = tab
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: tab.icon)
-                            .font(.caption)
-                        Text(tab.rawValue)
-                    }
-                    .font(.callout)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(selectedTab == tab ? Color.accentColor.opacity(0.1) : Color.clear)
-                    .foregroundStyle(selectedTab == tab ? Color.accentColor : .secondary)
-                }
-                .buttonStyle(.plain)
+                Text(tab.rawValue).tag(tab)
             }
-            Spacer()
         }
+        .pickerStyle(.segmented)
+        .labelsHidden()
         .padding(.horizontal)
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
     }
 
     // MARK: - Chat View
@@ -138,16 +140,17 @@ struct AgentDetailView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         if chatMessages.isEmpty {
-                            VStack(spacing: 8) {
-                                Image(systemName: "bubble.left.and.bubble.right")
-                                    .font(.system(size: 36))
-                                    .foregroundStyle(.tertiary)
-                                Text("Send a message to start chatting with \(agent.name)")
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
+                            if isLoadingHistory {
+                                LoadingStateView(message: "Loading chat history...")
+                                    .padding(.top, 60)
+                            } else {
+                                EmptyStateView(
+                                    icon: "bubble.left.and.bubble.right",
+                                    title: "Start a Conversation",
+                                    message: "Send a message to start chatting with \(agent.name)"
+                                )
+                                .padding(.top, 60)
                             }
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 60)
                         }
 
                         ForEach(chatMessages) { message in
@@ -156,15 +159,73 @@ struct AgentDetailView: View {
                         }
 
                         if isSending {
-                            HStack(spacing: 8) {
-                                ProgressView()
-                                    .controlSize(.small)
-                                Text("Thinking...")
-                                    .font(.callout)
+                            let streamText = gateway.isConnected ? gateway.streamingText : streamingProcess?.output ?? ""
+                            if !streamText.isEmpty {
+                                // Show streaming response as it arrives
+                                VStack(alignment: .leading, spacing: 4) {
+                                    MarkdownTextView(content: streamText)
+
+                                    HStack(spacing: 6) {
+                                        ProgressView()
+                                            .controlSize(.mini)
+                                            .tint(Color.accentColor)
+                                        Text("Responding...")
+                                            .font(.caption2)
+                                            .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                                        Spacer()
+                                        Button {
+                                            abortCurrentRun()
+                                        } label: {
+                                            Label("Stop", systemImage: "stop.fill")
+                                                .font(.caption2)
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.mini)
+                                        .tint(Color.red)
+                                    }
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color(nsColor: .controlBackgroundColor))
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                                .id("streaming")
+                            } else {
+                                HStack(spacing: 8) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .tint(Color.accentColor)
+                                    Text("Thinking...")
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Button {
+                                        abortCurrentRun()
+                                    } label: {
+                                        Label("Stop", systemImage: "stop.fill")
+                                            .font(.caption)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                    .tint(Color.red)
+                                }
+                                .padding(.horizontal)
+                                .id("thinking")
+                            }
+                        }
+
+                        // Slash command result
+                        if let result = slashCommandResult {
+                            HStack(spacing: 6) {
+                                Image(systemName: "terminal")
+                                    .foregroundStyle(.secondary)
+                                Text(result)
+                                    .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
-                            .padding(.horizontal)
-                            .id("thinking")
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.accentColor.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
                     }
                     .padding()
@@ -179,26 +240,155 @@ struct AgentDetailView: View {
                         proxy.scrollTo("thinking", anchor: .bottom)
                     }
                 }
+                .onChange(of: streamingProcess?.output) {
+                    withAnimation(.easeOut(duration: 0.1)) {
+                        proxy.scrollTo("streaming", anchor: .bottom)
+                    }
+                }
+                .onChange(of: gateway.streamingText) {
+                    withAnimation(.easeOut(duration: 0.1)) {
+                        proxy.scrollTo("streaming", anchor: .bottom)
+                    }
+                }
             }
 
             Divider()
 
             // Message input
-            HStack(spacing: 8) {
-                TextField("Message \(agent.name)...", text: $messageText, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...5)
-                    .onSubmit { sendMessage() }
+            VStack(spacing: 6) {
+                // Session & connection status bar
+                HStack(spacing: 8) {
+                    // Gateway connection indicator
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(gateway.isConnected ? Color.green : Color.orange)
+                            .frame(width: 6, height: 6)
+                            .accessibilityHidden(true)
+                        Text(gateway.isConnected ? "Gateway" : "CLI")
+                            .font(.caption2)
+                            .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Connection: \(gateway.isConnected ? "Gateway" : "CLI")")
 
-                Button {
-                    sendMessage()
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.title2)
+                    // Session switcher menu
+                    Menu {
+                        Button {
+                            startNewSession()
+                        } label: {
+                            Label("New Session", systemImage: "plus.bubble")
+                        }
+
+                        if !sessions.isEmpty {
+                            Divider()
+
+                            ForEach(sessions) { session in
+                                Button {
+                                    Task { await openSession(session) }
+                                } label: {
+                                    HStack {
+                                        if activeSessionKey == session.key {
+                                            Image(systemName: "checkmark")
+                                        }
+                                        Text(sessionMenuLabel(session))
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "bubble.left.and.bubble.right")
+                                .font(.caption2)
+                            if let key = activeSessionKey {
+                                Text(sessionDisplayKey(key))
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .lineLimit(1)
+                            } else {
+                                Text("New Session")
+                                    .font(.caption2)
+                            }
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.caption2)
+                        }
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+
+                    Spacer()
+
+                    // Session metrics (from gateway sessions data)
+                    if let session = sessions.first(where: { $0.key == activeSessionKey }) {
+                        HStack(spacing: 8) {
+                            if let input = session.inputTokens, input > 0 {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "arrow.up.doc")
+                                        .font(.caption2)
+                                    Text(formatTokenCount(input))
+                                }
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .help("Input tokens")
+                            }
+                            if let output = session.outputTokens, output > 0 {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "arrow.down.doc")
+                                        .font(.caption2)
+                                    Text(formatTokenCount(output))
+                                }
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .help("Output tokens")
+                            }
+                            if let total = session.totalTokens, total > 0 {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "sum")
+                                        .font(.caption2)
+                                    Text(formatTokenCount(total))
+                                }
+                                .font(.caption2)
+                                .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                                .help("Total tokens")
+                            }
+                            if let model = session.model, !model.isEmpty {
+                                Text(model.components(separatedBy: "/").last ?? model)
+                                    .font(.caption2)
+                                    .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+
+                    Button {
+                        startNewSession()
+                    } label: {
+                        Label("New Chat", systemImage: "plus.bubble")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(messageText.isEmpty || isSending ? .tertiary : .accentColor)
-                .disabled(messageText.isEmpty || isSending)
+
+                HStack(spacing: 8) {
+                    TextField("Message \(agent.name)... (/ for commands)", text: $messageText, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .lineLimit(1...5)
+                        .onSubmit { sendMessage() }
+
+                    Button {
+                        sendMessage()
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.title2)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(messageText.isEmpty || isSending ? Color(nsColor: .tertiaryLabelColor) : Color.accentColor)
+                    .disabled(messageText.isEmpty || isSending)
+                }
             }
             .padding(12)
         }
@@ -209,13 +399,11 @@ struct AgentDetailView: View {
             if message.role == .user { Spacer(minLength: 60) }
 
             VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 4) {
-                Text(message.content)
-                    .font(.body)
-                    .textSelection(.enabled)
+                MarkdownTextView(content: message.content)
 
                 Text(message.timestamp, style: .time)
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -229,7 +417,7 @@ struct AgentDetailView: View {
     private func bubbleBackground(_ role: ChatRole) -> Color {
         switch role {
         case .user: return Color.accentColor.opacity(0.15)
-        case .agent: return Color(.controlBackgroundColor)
+        case .agent: return Color(nsColor: .controlBackgroundColor)
         case .error: return Color.red.opacity(0.1)
         }
     }
@@ -238,43 +426,168 @@ struct AgentDetailView: View {
 
     private var filesView: some View {
         HSplitView {
-            // File list
-            List(workspaceFiles, selection: $selectedFileName) { file in
-                HStack(spacing: 8) {
-                    Image(systemName: file.isDirectory ? "folder.fill" : fileIcon(file.name))
-                        .foregroundStyle(file.isDirectory ? .blue : .secondary)
+            // File sidebar with navigation
+            VStack(spacing: 0) {
+                // Breadcrumb / path bar
+                HStack(spacing: 4) {
+                    // Home button (workspace root)
+                    Button {
+                        navigateToDirectory("")
+                    } label: {
+                        Image(systemName: "house.fill")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(currentDirectory.isEmpty ? .primary : .secondary)
 
-                    VStack(alignment: .leading) {
-                        Text(file.name)
-                            .font(.callout)
-                        if !file.isDirectory {
-                            Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
+                    if !currentDirectory.isEmpty {
+                        // Show breadcrumb path segments
+                        let segments = currentDirectory.components(separatedBy: "/").filter { !$0.isEmpty }
+                        ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
+                            Image(systemName: "chevron.right")
                                 .font(.caption2)
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+
+                            Button {
+                                // Navigate to this level
+                                let path = segments.prefix(index + 1).joined(separator: "/")
+                                navigateToDirectory(path)
+                            } label: {
+                                Text(segment)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(index == segments.count - 1 ? .primary : .secondary)
+                        }
+                    }
+
+                    Spacer()
+
+                    if isLoadingFiles {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .tint(Color.accentColor)
+                    }
+
+                    Button {
+                        navigateToDirectory(currentDirectory)
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(nsColor: .controlBackgroundColor))
+
+                Divider()
+
+                // Back row when inside a subdirectory
+                if !currentDirectory.isEmpty {
+                    Button {
+                        // Go up one level
+                        let parts = currentDirectory.components(separatedBy: "/").filter { !$0.isEmpty }
+                        let parent = parts.dropLast().joined(separator: "/")
+                        navigateToDirectory(parent)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "arrow.left")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text("..")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    Divider()
+                }
+
+                // File list
+                List(workspaceFiles, selection: $selectedFileName) { file in
+                    HStack(spacing: 8) {
+                        Image(systemName: file.isDirectory ? "folder.fill" : fileIcon(file.name))
+                            .foregroundStyle(file.isDirectory ? Color.accentColor : .secondary)
+
+                        VStack(alignment: .leading) {
+                            Text(file.name)
+                                .font(.callout)
+                            if !file.isDirectory {
+                                Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
+                                    .font(.caption2)
+                                    .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                            }
+                        }
+
+                        Spacer()
+
+                        if file.isDirectory {
+                            Image(systemName: "chevron.right")
+                                .font(.caption2)
+                                .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                        }
+                    }
+                    .tag(file.name)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) {
+                        if file.isDirectory {
+                            let subdir = currentDirectory.isEmpty ? file.name : "\(currentDirectory)/\(file.name)"
+                            navigateToDirectory(subdir)
+                        }
+                    }
+                    .onTapGesture(count: 1) {
+                        if file.isDirectory {
+                            let subdir = currentDirectory.isEmpty ? file.name : "\(currentDirectory)/\(file.name)"
+                            navigateToDirectory(subdir)
+                        } else {
+                            selectedFileName = file.name
                         }
                     }
                 }
-                .tag(file.name)
-                .onTapGesture {
-                    if !file.isDirectory {
-                        selectedFileName = file.name
-                        Task {
-                            selectedFileContent = await service.readWorkspaceFile(path: file.path)
-                        }
-                    }
+                .listStyle(.sidebar)
+            }
+            .frame(minWidth: 220)
+            .onChange(of: selectedFileName) {
+                guard let name = selectedFileName,
+                      let file = workspaceFiles.first(where: { $0.name == name }),
+                      !file.isDirectory else {
+                    return
+                }
+                selectedFileContent = nil
+                Task {
+                    selectedFileContent = await service.readWorkspaceFile(path: file.path)
                 }
             }
-            .listStyle(.sidebar)
-            .frame(minWidth: 200)
 
-            // File content
+            // File content panel
             VStack(spacing: 0) {
-                if let fileName = selectedFileName {
-                    HStack {
+                if let fileName = selectedFileName,
+                   let file = workspaceFiles.first(where: { $0.name == fileName }), !file.isDirectory {
+                    // File header with full path
+                    HStack(spacing: 6) {
                         Image(systemName: fileIcon(fileName))
-                        Text(fileName)
-                            .font(.headline)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(fileName)
+                                .font(.headline)
+                            // Show relative path
+                            if !currentDirectory.isEmpty {
+                                Text(currentDirectory)
+                                    .font(.caption2)
+                                    .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                            }
+                        }
                         Spacer()
+                        Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     .padding()
 
@@ -290,20 +603,32 @@ struct AgentDetailView: View {
                         }
                     } else {
                         ProgressView()
+                            .tint(Color.accentColor)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 } else {
-                    ContentUnavailableView {
-                        Label("Select a File", systemImage: "doc.text")
-                    } description: {
-                        Text("Choose a file from the sidebar to view its contents.")
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    EmptyStateView(
+                        icon: "doc.text",
+                        title: "Select a File",
+                        message: "Choose a file from the sidebar to view its contents. Click folders to navigate inside."
+                    )
                 }
             }
         }
         .task {
-            workspaceFiles = await service.listWorkspaceFiles(workspace: agent.workspace)
+            navigateToDirectory("")
+        }
+    }
+
+    private func navigateToDirectory(_ relativePath: String) {
+        currentDirectory = relativePath
+        selectedFileName = nil
+        selectedFileContent = nil
+        isLoadingFiles = true
+        Task {
+            let fullPath = relativePath.isEmpty ? agent.workspace : "\(agent.workspace)/\(relativePath)"
+            workspaceFiles = await service.listWorkspaceFiles(workspace: fullPath)
+            isLoadingFiles = false
         }
     }
 
@@ -318,8 +643,19 @@ struct AgentDetailView: View {
                 Text("\(sessions.count) session\(sessions.count == 1 ? "" : "s")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
                 Button {
-                    Task { sessions = await service.fetchSessions(agent: agent.name) }
+                    startNewSession()
+                    selectedTab = .chat
+                } label: {
+                    Label("New Session", systemImage: "plus.bubble")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button {
+                    Task { await refreshSessions() }
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
@@ -328,146 +664,217 @@ struct AgentDetailView: View {
 
             Divider()
 
-            if sessions.isEmpty {
-                ContentUnavailableView {
-                    Label("No Sessions", systemImage: "clock")
-                } description: {
-                    Text("No conversation sessions found for this agent. Send a message to start one.")
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if isLoadingSessions {
+                LoadingStateView(message: "Loading sessions...")
+            } else if sessions.isEmpty {
+                EmptyStateView(
+                    icon: "clock",
+                    title: "No Sessions",
+                    message: "No conversation sessions found for this agent. Send a message to start one."
+                )
             } else {
-                List(sessions) { session in
+                List(sessions, selection: $selectedSession) { session in
                     HStack(spacing: 12) {
-                        Image(systemName: "bubble.left.fill")
-                            .foregroundStyle(.blue)
+                        Image(systemName: activeSessionKey == session.key ? "bubble.left.and.bubble.right.fill" : "bubble.left.fill")
+                            .font(.title3)
+                            .foregroundStyle(activeSessionKey == session.key ? Color.accentColor : .secondary)
 
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(sessionDisplayKey(session.key))
+                                    .font(.callout.bold())
+                                    .lineLimit(1)
+
+                                if activeSessionKey == session.key {
+                                    StatusBadge(label: "Active", color: Color.green)
+                                }
+                            }
+
                             Text(session.key)
-                                .font(.callout.bold())
-                            if let model = session.model {
-                                Text(model)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                                .lineLimit(1)
+
+                            HStack(spacing: 8) {
+                                if let model = session.model {
+                                    Label(model, systemImage: "cpu")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                if let updatedAt = session.updatedAt {
+                                    Text(formatSessionDate(updatedAt))
+                                        .font(.caption)
+                                        .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                                }
                             }
                         }
 
                         Spacer()
 
-                        if let agentId = session.agentId {
-                            Text(agentId)
-                                .font(.caption2)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color(.controlBackgroundColor))
-                                .clipShape(Capsule())
+                        Button {
+                            Task { await openSession(session) }
+                        } label: {
+                            Text(activeSessionKey == session.key ? "Continue" : "Resume")
+                                .font(.caption)
                         }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                     }
-                    .padding(.vertical, 2)
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) {
+                        Task { await openSession(session) }
+                    }
                 }
             }
         }
         .task {
-            sessions = await service.fetchSessions(agent: agent.name)
+            await refreshSessions()
         }
+    }
+
+    private func refreshSessions() async {
+        // Try gateway first for richer session data
+        if gateway.isConnected {
+            do {
+                let response = try await gateway.sessionsList()
+                let allSessions = response.sessions ?? []
+                // Filter to this agent's sessions and convert to AgentSession
+                let agentSessions = allSessions.filter { $0.agentId == agent.name }
+                sessions = agentSessions.map { gs in
+                    var session = AgentSession(
+                        agentId: gs.agentId,
+                        key: gs.key,
+                        model: gs.model,
+                        sessionId: gs.sessionId,
+                        updatedAt: gs.updatedAt,
+                        kind: gs.kind
+                    )
+                    session.inputTokens = gs.inputTokens
+                    session.outputTokens = gs.outputTokens
+                    session.totalTokens = gs.totalTokens
+                    return session
+                }
+                .sorted { ($0.updatedAt ?? 0) > ($1.updatedAt ?? 0) }
+                isLoadingSessions = false
+                return
+            } catch {
+                print("[Sessions] Gateway sessions.list failed: \(error), falling back to CLI")
+            }
+        }
+        let fetched = await service.fetchSessions(agent: agent.name)
+        sessions = fetched.sorted { ($0.updatedAt ?? 0) > ($1.updatedAt ?? 0) }
+        isLoadingSessions = false
+    }
+
+    private func formatSessionDate(_ timestamp: Double) -> String {
+        let date = Date(timeIntervalSince1970: timestamp / 1000)
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     // MARK: - Info View
 
     private var infoView: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                infoSection("Agent", items: [
-                    ("Name", agent.name),
-                    ("Workspace", agent.workspace),
-                    ("Agent Dir", agent.agentDir ?? "—"),
-                    ("Default", agent.isDefault == true ? "Yes" : "No"),
-                    ("Bindings", "\(agent.bindingsCount ?? 0)"),
-                ])
-
-                if let routes = agent.routes, !routes.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Routes")
-                            .font(.headline)
-
-                        ForEach(routes, id: \.self) { route in
-                            HStack(spacing: 8) {
-                                Image(systemName: "arrow.triangle.branch")
-                                    .foregroundStyle(.secondary)
-                                Text(route)
-                                    .font(.callout)
-                            }
-                        }
-                    }
-                    .padding()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.controlBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                }
-
-                // Quick actions
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Actions")
-                        .font(.headline)
-
-                    HStack(spacing: 12) {
-                        Button {
-                            Task {
-                                await service.runCommand("openclaw gateway restart")
-                            }
-                        } label: {
-                            Label("Restart Gateway", systemImage: "arrow.clockwise")
-                        }
-                        .buttonStyle(.bordered)
-
-                        Button(role: .destructive) {
-                            Task {
-                                await service.deleteAgent(name: agent.name)
-                            }
-                        } label: {
-                            Label("Delete Agent", systemImage: "trash")
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+        Form {
+            Section("Agent") {
+                LabeledContent("Name", value: agent.name)
+                LabeledContent("Workspace", value: agent.workspace)
+                LabeledContent("Agent Dir", value: agent.agentDir ?? "—")
+                LabeledContent("Default", value: agent.isDefault == true ? "Yes" : "No")
+                LabeledContent("Bindings", value: "\(agent.bindingsCount ?? 0)")
             }
-            .padding()
-        }
-    }
 
-    private func infoSection(_ title: String, items: [(String, String)]) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.headline)
+            if let routes = agent.routes, !routes.isEmpty {
+                Section("Routes") {
+                    ForEach(routes, id: \.self) { route in
+                        Label(route, systemImage: "arrow.triangle.branch")
+                    }
+                }
+            }
 
-            ForEach(items, id: \.0) { key, value in
-                HStack(alignment: .top) {
-                    Text(key)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 100, alignment: .trailing)
-                    Text(value)
-                        .font(.callout)
-                        .textSelection(.enabled)
-                    Spacer()
+            Section("Actions") {
+                HStack(spacing: 12) {
+                    Button {
+                        showRestartGatewayConfirm = true
+                    } label: {
+                        Label("Restart Gateway", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button(role: .destructive) {
+                        showDeleteConfirm = true
+                    } label: {
+                        Label("Delete Agent", systemImage: "trash")
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
         }
-        .padding()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .formStyle(.grouped)
     }
 
     // MARK: - Helpers
 
+    @MainActor
     private func loadData() async {
-        async let filesTask: () = { workspaceFiles = await service.listWorkspaceFiles(workspace: agent.workspace) }()
-        async let sessionsTask: () = { sessions = await service.fetchSessions(agent: agent.name) }()
-        _ = await (filesTask, sessionsTask)
+        // Try connecting to gateway WebSocket
+        gateway.connect()
+        // Give gateway a moment to complete handshake
+        try? await Task.sleep(for: .milliseconds(500))
+
+        workspaceFiles = await service.listWorkspaceFiles(workspace: agent.workspace)
+        await refreshSessions()
+
+        // If a specific session was requested (e.g. from the Sessions list), open it
+        if let targetId = initialSessionId,
+           let target = sessions.first(where: { $0.sessionId == targetId || $0.key == targetId }) {
+            await openSession(target)
+        } else if let latest = sessions.first {
+            await openSession(latest)
+        }
+    }
+
+    @MainActor
+    private func openSession(_ session: AgentSession) async {
+        selectedSession = session
+        activeSessionId = session.sessionId
+        activeSessionKey = session.key
+        isLoadingHistory = true
+        slashCommandResult = nil
+        chatMessages = []
+
+        // Try loading history via gateway WebSocket first, fall back to JSONL files
+        var loaded = false
+
+        if gateway.isConnected, !session.key.isEmpty {
+            do {
+                let historyResponse = try await gateway.chatHistory(sessionKey: session.key)
+                let msgs = historyResponse.toChatMessages()
+                chatMessages = msgs
+                loaded = true
+                print("[Chat] Loaded \(msgs.count) messages via gateway for key: \(session.key)")
+
+                // Also update the sessionId from the response if we don't have one
+                if activeSessionId == nil, let sid = historyResponse.sessionId {
+                    activeSessionId = sid
+                }
+            } catch {
+                print("[Chat] Gateway history failed: \(error)")
+            }
+        }
+
+        // Fallback: read JSONL transcript from disk
+        if !loaded, let sessionId = session.sessionId ?? activeSessionId {
+            let msgs = await service.loadSessionHistory(agent: agent.name, sessionId: sessionId)
+            chatMessages = msgs
+            print("[Chat] Loaded \(msgs.count) messages from JSONL for sessionId: \(sessionId)")
+        }
+
+        isLoadingHistory = false
+        selectedTab = .chat
     }
 
     private func sendMessage() {
@@ -475,19 +882,283 @@ struct AgentDetailView: View {
         let text = messageText
         messageText = ""
 
+        // Handle slash commands
+        if text.hasPrefix("/") {
+            handleSlashCommand(text)
+            return
+        }
+
         chatMessages.append(ChatMessage(role: .user, content: text, timestamp: Date()))
         isSending = true
 
-        Task {
-            let result = await service.sendMessage(to: agent.name, message: text)
-            isSending = false
+        if gateway.isConnected {
+            // If no active session key, generate a new unique one for a fresh session
+            let sessionKey = activeSessionKey ?? "agent:\(agent.name):\(UUID().uuidString.prefix(8).lowercased())"
+            if activeSessionKey == nil {
+                activeSessionKey = sessionKey
+            }
+            sendViaGateway(text: text, sessionKey: sessionKey)
+        } else {
+            // CLI mode: omitting session-id creates a new session automatically
+            sendViaCLI(text: text)
+        }
+    }
 
-            if result.exitCode == 0 {
-                chatMessages.append(ChatMessage(role: .agent, content: result.output, timestamp: Date()))
-            } else {
-                chatMessages.append(ChatMessage(role: .error, content: result.output, timestamp: Date()))
+    private func sendViaGateway(text: String, sessionKey: String) {
+        Task {
+            do {
+                // chatSend returns immediately with acceptance; streaming happens via agent events
+                _ = try await gateway.chatSend(sessionKey: sessionKey, message: text)
+
+                // Wait for the agent to finish streaming
+                await gateway.waitForAgentCompletion()
+
+                isSending = false
+
+                // Use the accumulated streaming text
+                let responseText = gateway.streamingText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !responseText.isEmpty {
+                    chatMessages.append(ChatMessage(role: .agent, content: responseText, timestamp: Date()))
+                }
+
+                gateway.streamingText = ""
+
+                // Refresh sessions to pick up newly created session
+                await refreshSessions()
+
+                // If we didn't have a sessionId before, find it from the refreshed sessions
+                if activeSessionId == nil,
+                   let match = sessions.first(where: { $0.key == sessionKey }) {
+                    activeSessionId = match.sessionId
+                }
+            } catch {
+                isSending = false
+                gateway.streamingText = ""
+                chatMessages.append(ChatMessage(role: .error, content: error.localizedDescription, timestamp: Date()))
             }
         }
+    }
+
+    private func sendViaCLI(text: String) {
+        // Start a streaming process so output appears in real-time
+        let proc = service.sendMessageStreaming(to: agent.name, message: text, sessionId: activeSessionId)
+        streamingProcess = proc
+        proc.start()
+
+        Task {
+            while proc.isRunning {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+
+            let output = proc.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            let exitCode = proc.exitCode
+
+            streamingProcess = nil
+            isSending = false
+
+            if exitCode == 0 && !output.isEmpty {
+                chatMessages.append(ChatMessage(role: .agent, content: output, timestamp: Date()))
+            } else if !output.isEmpty {
+                chatMessages.append(ChatMessage(role: .error, content: output, timestamp: Date()))
+            }
+
+            // Refresh sessions to capture any new session
+            await refreshSessions()
+
+            // If this was a new session, pick up the newly created session info
+            if activeSessionId == nil || activeSessionKey == nil {
+                // Sort by updatedAt descending to find the most recently active session
+                let sorted = sessions.sorted { ($0.updatedAt ?? 0) > ($1.updatedAt ?? 0) }
+                if let newest = sorted.first {
+                    if activeSessionId == nil {
+                        activeSessionId = newest.sessionId
+                    }
+                    if activeSessionKey == nil {
+                        activeSessionKey = newest.key
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Slash Commands
+
+    private func handleSlashCommand(_ input: String) {
+        let parts = input.trimmingCharacters(in: .whitespaces).components(separatedBy: " ")
+        let command = parts[0].lowercased()
+        let args = parts.dropFirst().joined(separator: " ")
+
+        switch command {
+        case "/new", "/reset":
+            if let key = activeSessionKey, gateway.isConnected {
+                // Reset the current session via gateway RPC (archives old transcript, new sessionId)
+                slashCommandResult = "Resetting session..."
+                Task {
+                    _ = try? await gateway.sessionsReset(sessionKey: key)
+                    activeSessionId = nil
+                    selectedSession = nil
+                    chatMessages = []
+                    await refreshSessions()
+                    // Pick up the new sessionId for the same key
+                    if let refreshed = sessions.first(where: { $0.key == key }) {
+                        activeSessionId = refreshed.sessionId
+                    }
+                    slashCommandResult = "Session reset. Chat history archived."
+                    if !args.isEmpty {
+                        slashCommandResult! += " Model hint: \(args)"
+                    }
+                }
+            } else {
+                // No active session or no gateway — just clear local state
+                startNewSession()
+                slashCommandResult = "New session. Next message starts a fresh conversation."
+                if !args.isEmpty {
+                    slashCommandResult! += " Model hint: \(args)"
+                }
+            }
+
+        case "/compact":
+            slashCommandResult = "Compacting session..."
+            Task {
+                let result = await service.runCommand("openclaw agent --to \(agent.name) --message \"/compact \(args)\" --session-id \(activeSessionId ?? "")")
+                slashCommandResult = result.exitCode == 0 ? "Session compacted." : "Compact failed: \(result.output)"
+            }
+
+        case "/status":
+            slashCommandResult = "Fetching status..."
+            Task {
+                let result = await service.runCommand("openclaw agent --to \(agent.name) --message \"/status\" --session-id \(activeSessionId ?? "")")
+                slashCommandResult = result.output.isEmpty ? "No status info returned." : result.output
+            }
+
+        case "/think", "/thinking", "/t":
+            if args.isEmpty {
+                slashCommandResult = "Usage: /think <off|minimal|low|medium|high|xhigh>"
+            } else {
+                slashCommandResult = "Setting thinking level to: \(args)"
+                if gateway.isConnected, let key = activeSessionKey {
+                    Task {
+                        _ = try? await gateway.sessionsPatch(sessionKey: key, patch: ["thinkingLevel": args])
+                        slashCommandResult = "Thinking level set to: \(args)"
+                    }
+                }
+            }
+
+        case "/model":
+            if args.isEmpty {
+                slashCommandResult = "Current model: \(selectedSession?.model ?? "default")"
+            } else {
+                slashCommandResult = "Switching model to: \(args)"
+                if gateway.isConnected, let key = activeSessionKey {
+                    Task {
+                        _ = try? await gateway.sessionsPatch(sessionKey: key, patch: ["model": args])
+                        slashCommandResult = "Model set to: \(args)"
+                    }
+                }
+            }
+
+        case "/verbose", "/v":
+            let level = args.isEmpty ? "on" : args
+            slashCommandResult = "Verbose: \(level)"
+            if gateway.isConnected, let key = activeSessionKey {
+                Task {
+                    _ = try? await gateway.sessionsPatch(sessionKey: key, patch: ["verboseLevel": level])
+                }
+            }
+
+        case "/export", "/export-session":
+            slashCommandResult = "Exporting session..."
+            Task {
+                let path = args.isEmpty ? "~/Desktop/session-export.html" : args
+                let result = await service.runCommand("openclaw agent --to \(agent.name) --message \"/export-session \(path)\" --session-id \(activeSessionId ?? "")")
+                slashCommandResult = result.exitCode == 0 ? "Exported to \(path)" : result.output
+            }
+
+        case "/context":
+            slashCommandResult = "Fetching context..."
+            Task {
+                let mode = args.isEmpty ? "list" : args
+                let result = await service.runCommand("openclaw agent --to \(agent.name) --message \"/context \(mode)\" --session-id \(activeSessionId ?? "")")
+                slashCommandResult = result.output.isEmpty ? "No context info." : result.output
+            }
+
+        case "/help", "/commands":
+            slashCommandResult = """
+            /new [model] - Start new session
+            /compact [instructions] - Compact context
+            /status - Session status
+            /think <level> - Set thinking level
+            /model [name] - Switch model
+            /verbose on|off - Toggle verbose
+            /export [path] - Export session
+            /context [list|detail|json] - View context
+            """
+
+        default:
+            // Forward unknown slash commands to the agent
+            chatMessages.append(ChatMessage(role: .user, content: input, timestamp: Date()))
+            isSending = true
+            if gateway.isConnected, let key = activeSessionKey {
+                sendViaGateway(text: input, sessionKey: key)
+            } else {
+                sendViaCLI(text: input)
+            }
+        }
+    }
+
+    private func abortCurrentRun() {
+        guard let key = activeSessionKey, gateway.isConnected else { return }
+        Task {
+            do {
+                _ = try await gateway.chatAbort(sessionKey: key)
+                isSending = false
+                let streamedSoFar = gateway.streamingText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !streamedSoFar.isEmpty {
+                    chatMessages.append(ChatMessage(role: .agent, content: streamedSoFar + "\n\n[Aborted]", timestamp: Date()))
+                }
+                gateway.streamingText = ""
+            } catch {
+                chatMessages.append(ChatMessage(role: .error, content: "Abort failed: \(error.localizedDescription)", timestamp: Date()))
+            }
+        }
+    }
+
+    private func formatTokenCount(_ count: Int) -> String {
+        if count >= 1_000_000 { return String(format: "%.1fM", Double(count) / 1_000_000) }
+        if count >= 1_000 { return String(format: "%.1fK", Double(count) / 1_000) }
+        return "\(count)"
+    }
+
+    private func startNewSession() {
+        activeSessionId = nil
+        activeSessionKey = nil
+        selectedSession = nil
+        chatMessages = []
+        slashCommandResult = nil
+    }
+
+    /// Short display name for a session key (strips the `agent:<name>:` prefix)
+    private func sessionDisplayKey(_ key: String) -> String {
+        let parts = key.components(separatedBy: ":")
+        if parts.count >= 3 {
+            return parts.dropFirst(2).joined(separator: ":")
+        }
+        return key
+    }
+
+    private func sessionMenuLabel(_ session: AgentSession) -> String {
+        var parts: [String] = []
+        parts.append(sessionDisplayKey(session.key))
+        if let model = session.model {
+            parts.append("(\(model))")
+        }
+        if let updatedAt = session.updatedAt {
+            let date = Date(timeIntervalSince1970: updatedAt / 1000)
+            let formatter = RelativeDateTimeFormatter()
+            formatter.unitsStyle = .abbreviated
+            parts.append(formatter.localizedString(for: date, relativeTo: Date()))
+        }
+        return parts.joined(separator: " ")
     }
 
     private func fileIcon(_ name: String) -> String {
@@ -500,10 +1171,10 @@ struct AgentDetailView: View {
 
     private func agentColor(_ status: AgentStatus) -> Color {
         switch status {
-        case .online, .working: return .green
-        case .idle: return .yellow
-        case .offline: return .red
-        case .unknown: return .gray
+        case .online, .working: return Color.green
+        case .idle: return Color.yellow
+        case .offline: return Color.red
+        case .unknown: return Color(nsColor: .tertiaryLabelColor)
         }
     }
 }

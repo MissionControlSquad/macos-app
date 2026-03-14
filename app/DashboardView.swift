@@ -35,7 +35,7 @@ struct ModelCatalogPicker: View {
             Picker("Model", selection: $selection) {
                 Text(selectedProvider.isEmpty ? "Choose provider first" : placeholder).tag("")
                 ForEach(providerModels) { model in
-                    Text(model.displayLabel).tag(model.key)
+                    Text(model.displayLabel).tag(model.modelKey)
                 }
             }
             .pickerStyle(.menu)
@@ -68,12 +68,9 @@ struct ProviderSelectionPicker: View {
     @Binding var selection: String
     var title: String = "Provider"
 
-    private var catalogProviders: [String] { ModelCatalogStore.shared.providers }
-    private var quickProviders: [String] { ["anthropic", "openai", "google", "mistral", "openrouter", "ollama", "huggingface", "venice"] }
-
     private var allProviders: [String] {
         var seen = Set<String>()
-        let merged = catalogProviders + quickProviders + (selection.isEmpty ? [] : [selection])
+        let merged = ModelCatalogStore.shared.providers + (selection.isEmpty ? [] : [selection])
         return merged.filter { seen.insert($0).inserted }.sorted()
     }
 
@@ -89,73 +86,60 @@ struct ProviderSelectionPicker: View {
     }
 }
 
-enum SidebarSection: String, CaseIterable {
-    case main = "Dashboard"
-    case manage = "Manage"
-    case system = "System"
-}
-
-enum SidebarItem: String, Identifiable {
+enum SidebarItem: String, Identifiable, CaseIterable {
     case agents = "Agents"
+    case sessions = "Sessions"
+    case logs = "Logs"
     case gateway = "Gateway"
     case models = "Models"
-    case channels = "Channels"
-    case logs = "Logs"
-    case memory = "Memory"
-    case skills = "Skills & Plugins"
-    case cron = "Automation"
-    case hooks = "Hooks"
     case settings = "Settings"
-    case terminal = "Terminal"
 
     var id: String { rawValue }
 
     var icon: String {
         switch self {
         case .agents: return "person.3.fill"
+        case .sessions: return "bubble.left.and.bubble.right.fill"
+        case .logs: return "doc.text.magnifyingglass"
         case .gateway: return "server.rack"
         case .models: return "cpu"
-        case .channels: return "message.fill"
-        case .logs: return "doc.text.magnifyingglass"
-        case .memory: return "brain.head.profile"
-        case .skills: return "puzzlepiece.extension.fill"
-        case .cron: return "clock.arrow.2.circlepath"
-        case .hooks: return "link.circle.fill"
         case .settings: return "gearshape"
-        case .terminal: return "terminal.fill"
         }
     }
-
-    var section: SidebarSection {
-        switch self {
-        case .agents, .gateway, .models: return .main
-        case .channels, .logs, .memory, .skills, .cron, .hooks: return .manage
-        case .settings, .terminal: return .system
-        }
-    }
-
-    static let allItems: [SidebarItem] = [
-        .agents, .gateway, .models,
-        .channels, .logs, .memory, .skills, .cron, .hooks,
-        .settings, .terminal
-    ]
 }
 
 struct DashboardView: View {
     @State private var service = OpenClawService()
-    @State private var selectedItem: SidebarItem? = .agents
-    @State private var customCommand = ""
+    @State private var gateway = GatewayWebSocket()
+    // Selection uses a simple string: nav item rawValue or "agent:<id>"
+    @State private var selection: String? = SidebarItem.agents.rawValue
     @State private var showAddAgent = false
     @State private var autoRefreshTask: Task<Void, Never>?
-    @State private var selectedAgent: Agent?
+    @State private var openSessionId: String?
+
+    // Confirmation dialogs
+    @State private var agentToDelete: Agent?
+    @State private var showDeleteConfirm = false
+    @State private var showStopGatewayConfirm = false
+    @State private var showUninstallGatewayConfirm = false
+
+    // Action feedback
+    @State private var toast = ToastState()
 
     var body: some View {
         NavigationSplitView {
-            sidebar
+            sidebarContent
+                .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 280)
+                .navigationTitle("AgentCenter")
         } detail: {
             detailView
         }
+        .toastOverlay(toast)
         .task {
+            // Wire gateway into service and model catalog for WebSocket-first operations
+            service.gateway = gateway
+            ModelCatalogStore.shared.gateway = gateway
+            gateway.connect()
             await service.refreshAll()
             startAutoRefresh()
         }
@@ -165,6 +149,60 @@ struct DashboardView: View {
         .sheet(isPresented: $showAddAgent) {
             addAgentSheet
         }
+        .confirmationDialog(
+            "Delete Agent",
+            isPresented: $showDeleteConfirm,
+            presenting: agentToDelete
+        ) { agent in
+            Button("Delete \"\(agent.displayName ?? agent.name)\"", role: .destructive) {
+                Task {
+                    let result = await service.deleteAgent(name: agent.name)
+                    if result.exitCode == 0 {
+                        toast.show("Agent \"\(agent.displayName ?? agent.name)\" deleted")
+                        if selection == "agent:\(agent.id)" {
+                            selection = SidebarItem.agents.rawValue
+                        }
+                    } else {
+                        toast.show("Failed to delete agent: \(result.output)", isError: true)
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { agent in
+            Text("This will permanently remove \"\(agent.displayName ?? agent.name)\" and its configuration. This action cannot be undone.")
+        }
+        .confirmationDialog(
+            "Stop Gateway",
+            isPresented: $showStopGatewayConfirm
+        ) {
+            Button("Stop Gateway", role: .destructive) {
+                runGatewayAction(label: "Stop Gateway") { await service.stopGateway() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Stopping the gateway will disconnect all active agent sessions and channels. Are you sure?")
+        }
+        .confirmationDialog(
+            "Uninstall Gateway Service",
+            isPresented: $showUninstallGatewayConfirm
+        ) {
+            Button("Uninstall", role: .destructive) {
+                runGatewayAction(label: "Uninstall Gateway") { await service.runCommand("openclaw gateway uninstall") }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will remove the gateway background service. You can reinstall it later. Are you sure?")
+        }
+        // Menu bar command bindings
+        .focusedSceneValue(\.navigate, NavigateAction { item in
+            selection = item.rawValue
+        })
+        .focusedSceneValue(\.refresh, RefreshAction {
+            Task { await service.refreshAll() }
+        })
+        .focusedSceneValue(\.addAgent, AddAgentAction {
+            showAddAgent = true
+        })
     }
 
     // MARK: - Auto Refresh
@@ -182,118 +220,102 @@ struct DashboardView: View {
 
     // MARK: - Sidebar
 
-    private var sidebar: some View {
-        List(selection: $selectedItem) {
-            ForEach(SidebarSection.allCases, id: \.self) { section in
-                Section(section.rawValue) {
-                    ForEach(SidebarItem.allItems.filter { $0.section == section }) { item in
-                        Button {
-                            selectedItem = item
-                            selectedAgent = nil
-                        } label: {
-                            Label(item.rawValue, systemImage: item.icon)
-                        }
-                        .buttonStyle(.plain)
-                    }
+    private var sidebarContent: some View {
+        List(selection: $selection) {
+            Section {
+                ForEach(SidebarItem.allCases) { item in
+                    Label(item.rawValue, systemImage: item.icon)
+                        .tag(item.rawValue)
+                        .badge(badgeCount(for: item))
                 }
             }
 
-            Section("Quick Actions") {
-                Button {
-                    Task { await service.refreshAll() }
-                } label: {
-                    Label("Refresh All", systemImage: "arrow.clockwise")
-                }
-
-                Button {
-                    Task { await service.runDoctor() }
-                } label: {
-                    Label("Run Doctor", systemImage: "stethoscope")
-                }
-            }
-
-            // Live agent list in sidebar
             if !service.agents.isEmpty {
-                Section("Agents (\(service.agents.count))") {
+                Section("Agents · \(service.agents.count)") {
                     ForEach(service.agents) { agent in
-                        Button {
-                            selectedAgent = agent
-                            selectedItem = .agents
-                        } label: {
-                            HStack(spacing: 6) {
-                                if let emoji = agent.emoji, !emoji.isEmpty {
-                                    Text(emoji)
-                                } else {
-                                    Image(systemName: agent.agentStatus.icon)
-                                        .foregroundStyle(agentColor(agent.agentStatus))
-                                }
-                                Text(agent.displayName ?? agent.name)
-                                    .font(.callout)
+                        HStack(spacing: 8) {
+                            if let emoji = agent.emoji, !emoji.isEmpty {
+                                Text(emoji)
+                                    .accessibilityHidden(true)
+                            } else {
+                                Circle()
+                                    .fill(agentColor(agent.agentStatus))
+                                    .frame(width: 7, height: 7)
+                                    .accessibilityHidden(true)
+                            }
+                            Text(agent.displayName ?? agent.name)
+                                .lineLimit(1)
+                        }
+                        .tag("agent:\(agent.id)")
+                        .accessibilityLabel("\(agent.displayName ?? agent.name), \(agent.agentStatus.label)")
+                        .contextMenu {
+                            Button("Delete Agent", role: .destructive) {
+                                agentToDelete = agent
+                                showDeleteConfirm = true
                             }
                         }
-                        .buttonStyle(.plain)
                     }
-                }
-            }
-
-            // Gateway status badge
-            Section("Status") {
-                HStack {
-                    Image(systemName: "circle.fill")
-                        .font(.caption2)
-                        .foregroundStyle(service.gatewayStatus?.running == true ? .green : .red)
-                    Text("Gateway")
-                        .font(.callout)
-                    Spacer()
-                    Text(service.gatewayStatus?.running == true ? "Running" : "Stopped")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
             }
         }
         .listStyle(.sidebar)
-        .navigationTitle("OpenClaw")
-        .toolbar {
-            ToolbarItem {
-                if service.isLoading {
-                    ProgressView()
-                        .controlSize(.small)
-                }
+        .safeAreaInset(edge: .bottom) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(gateway.isConnected ? Color.green : service.gatewayStatus?.running == true ? Color.yellow : Color.red)
+                    .frame(width: 7, height: 7)
+                    .accessibilityHidden(true)
+                Text(gateway.isConnected ? "Connected" : service.gatewayStatus?.running == true ? "Running" : "Offline")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
             }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Gateway status: \(gateway.isConnected ? "Connected" : service.gatewayStatus?.running == true ? "Running" : "Offline")")
+        }
+    }
+
+    private func badgeCount(for item: SidebarItem) -> Int {
+        switch item {
+        case .gateway:
+            return gateway.pendingApprovals.count
+        default:
+            return 0
         }
     }
 
     // MARK: - Detail
 
+    /// Resolve the selected agent from the string-based selection tag.
+    private var selectedAgent: Agent? {
+        guard let selection, selection.hasPrefix("agent:") else { return nil }
+        let agentId = String(selection.dropFirst("agent:".count))
+        return service.agents.first { $0.id == agentId }
+    }
+
     @ViewBuilder
     private var detailView: some View {
-        if let selectedAgent {
-            AgentDetailView(agent: selectedAgent, service: service)
+        if let agent = selectedAgent {
+            AgentDetailView(agent: agent, service: service, initialSessionId: openSessionId)
         } else {
-            switch selectedItem {
-            case .agents:
-                agentsView
-            case .gateway:
-                gatewayView
-            case .models:
-                modelsView
-            case .channels:
-                ChannelsView(service: service)
-            case .logs:
+            switch selection {
+            case SidebarItem.sessions.rawValue:
+                SessionsListView(service: service) { agent, sessionId in
+                    openSessionId = sessionId
+                    selection = "agent:\(agent.id)"
+                }
+            case SidebarItem.logs.rawValue:
                 LogsView(service: service)
-            case .memory:
-                MemoryView(service: service)
-            case .skills:
-                SkillsPluginsView(service: service)
-            case .cron:
-                CronView(service: service)
-            case .hooks:
-                HooksView(service: service)
-            case .settings:
-                SettingsView(service: service)
-            case .terminal:
-                terminalView
-            case nil:
+            case SidebarItem.gateway.rawValue:
+                gatewayView
+            case SidebarItem.models.rawValue:
+                modelsView
+            case SidebarItem.settings.rawValue:
+                SettingsView(service: service, gateway: gateway)
+            default:
                 agentsView
             }
         }
@@ -302,50 +324,46 @@ struct DashboardView: View {
     // MARK: - Agents View
 
     private var agentsView: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Agents")
-                    .font(.title.bold())
-                Spacer()
-                Button {
-                    showAddAgent = true
-                } label: {
-                    Label("Add Agent", systemImage: "plus")
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    Task { await service.fetchAgents() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-            }
-            .padding()
-
-            Divider()
-
-            if service.agents.isEmpty {
-                ContentUnavailableView {
-                    Label("No Agents", systemImage: "person.slash")
-                } description: {
-                    Text("Create your first agent to get started.")
-                } actions: {
-                    Button("Add Agent") {
-                        showAddAgent = true
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        Group {
+            if service.isLoading && service.agents.isEmpty {
+                LoadingStateView(message: "Loading agents...")
+            } else if service.agents.isEmpty {
+                EmptyStateView(
+                    icon: "person.3",
+                    title: "No Agents",
+                    message: "Create your first agent to get started.",
+                    actionLabel: "Add Agent",
+                    action: { showAddAgent = true }
+                )
             } else {
                 List {
                     ForEach(service.agents) { agent in
                         agentRow(agent)
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                selectedAgent = agent
+                                selection = "agent:\(agent.id)"
                             }
                     }
                 }
+            }
+        }
+        .navigationTitle("Agents")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showAddAgent = true
+                } label: {
+                    Label("Add Agent", systemImage: "plus")
+                }
+                .help("Add a new agent")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    Task { await service.fetchAgents() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Refresh agents")
             }
         }
     }
@@ -364,6 +382,7 @@ struct DashboardView: View {
                 }
             }
             .frame(width: 36)
+            .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -372,7 +391,7 @@ struct DashboardView: View {
                     if agent.displayName != nil {
                         Text("(\(agent.name))")
                             .font(.caption)
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
                     }
                 }
                 Text(agent.workspace)
@@ -381,20 +400,10 @@ struct DashboardView: View {
 
                 HStack(spacing: 6) {
                     if let count = agent.bindingsCount, count > 0 {
-                        Text("\(count) binding\(count == 1 ? "" : "s")")
-                            .font(.caption2)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.blue.opacity(0.1))
-                            .clipShape(Capsule())
+                        StatusBadge(label: "\(count) binding\(count == 1 ? "" : "s")", color: Color.accentColor)
                     }
                     if agent.isDefault == true {
-                        Text("Default")
-                            .font(.caption2)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.green.opacity(0.1))
-                            .clipShape(Capsule())
+                        StatusBadge(label: "Default", color: Color.green)
                     }
                 }
             }
@@ -411,148 +420,137 @@ struct DashboardView: View {
         }
         .padding(.vertical, 4)
         .contextMenu {
-            Button("Delete Agent") {
-                Task { await service.deleteAgent(name: agent.name) }
+            Button("Show Details") {
+                selection = "agent:\(agent.id)"
+            }
+            Button("Copy Agent Name") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(agent.name, forType: .string)
+            }
+            Divider()
+            Button("Delete Agent", role: .destructive) {
+                agentToDelete = agent
+                showDeleteConfirm = true
             }
         }
     }
 
     // MARK: - Gateway View
 
-    @State private var gatewayActionResult = ""
-    @State private var gatewayActionIsError = false
     @State private var gatewayIsActing = false
 
     private var gatewayView: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Gateway")
-                    .font(.title.bold())
-                Spacer()
-                if gatewayIsActing {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-                Button {
-                    Task { await service.fetchGatewayStatus() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-            }
-            .padding()
-
-            Divider()
-
-            ScrollView {
+        ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     // Status card
-                    HStack(spacing: 12) {
-                        Image(systemName: service.gatewayStatus?.running == true ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .font(.largeTitle)
-                            .foregroundStyle(service.gatewayStatus?.running == true ? .green : .red)
+                    GroupBox("Status") {
+                        HStack(spacing: 12) {
+                            Image(systemName: service.gatewayStatus?.running == true ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .font(.largeTitle)
+                                .foregroundStyle(service.gatewayStatus?.running == true ? Color.green : Color.red)
 
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(service.gatewayStatus?.running == true ? "Gateway is Running" : "Gateway is Stopped")
-                                .font(.title2.bold())
-                            if let port = service.gatewayStatus?.gatewayPort {
-                                Text("Port: \(port)")
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(service.gatewayStatus?.running == true ? "Gateway is Running" : "Gateway is Stopped")
+                                    .font(.title2.bold())
+                                if let port = service.gatewayStatus?.gatewayPort {
+                                    Text("Port: \(port)")
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+                                }
+                                if let bindMode = service.gatewayStatus?.gateway?.bindMode {
+                                    Text("Bind: \(bindMode)")
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+                                }
+                                if let pid = service.gatewayStatus?.pid {
+                                    Text("PID: \(pid)")
+                                        .font(.caption)
+                                        .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                                }
                             }
-                            if let bindMode = service.gatewayStatus?.gateway?.bindMode {
-                                Text("Bind: \(bindMode)")
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
-                            }
-                            if let pid = service.gatewayStatus?.pid {
-                                Text("PID: \(pid)")
-                                    .font(.caption)
-                                    .foregroundStyle(.tertiary)
-                            }
+
+                            Spacer()
                         }
-
-                        Spacer()
                     }
-                    .padding()
-                    .background(Color(.controlBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
 
                     // Control buttons
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Controls")
-                            .font(.headline)
-
-                        HStack(spacing: 12) {
-                            if service.gatewayStatus?.running == true {
-                                Button {
-                                    runGatewayAction { await service.stopGateway() }
-                                } label: {
-                                    Label("Stop", systemImage: "stop.fill")
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(gatewayIsActing)
-
-                                Button {
-                                    runGatewayAction { await service.restartGateway() }
-                                } label: {
-                                    Label("Restart", systemImage: "arrow.clockwise")
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(gatewayIsActing)
-                            } else {
-                                Button {
-                                    runGatewayAction { await service.startGateway() }
-                                } label: {
-                                    Label(gatewayIsActing ? "Starting..." : "Start Gateway", systemImage: "play.fill")
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(gatewayIsActing)
-                            }
-
-                            Button {
-                                runGatewayAction { await service.gatewayHealth() }
-                            } label: {
-                                Label("Health Check", systemImage: "heart.text.square")
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(gatewayIsActing)
-                        }
-
-                        // Advanced service management
-                        DisclosureGroup("Advanced") {
+                    GroupBox("Controls") {
+                        VStack(alignment: .leading, spacing: 12) {
                             HStack(spacing: 12) {
-                                Button {
-                                    runGatewayAction { await service.installGateway() }
-                                } label: {
-                                    Label("Reinstall Service", systemImage: "square.and.arrow.down")
+                                if service.gatewayStatus?.running == true {
+                                    Button {
+                                        showStopGatewayConfirm = true
+                                    } label: {
+                                        Label("Stop", systemImage: "stop.fill")
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .disabled(gatewayIsActing)
+
+                                    Button {
+                                        runGatewayAction(label: "Restart Gateway") { await service.restartGateway() }
+                                    } label: {
+                                        Label("Restart", systemImage: "arrow.clockwise")
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .disabled(gatewayIsActing)
+                                } else {
+                                    Button {
+                                        runGatewayAction(label: "Start Gateway") { await service.startGateway() }
+                                    } label: {
+                                        Label(gatewayIsActing ? "Starting..." : "Start Gateway", systemImage: "play.fill")
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(gatewayIsActing)
                                 }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
 
                                 Button {
-                                    runGatewayAction { await service.runCommand("openclaw gateway uninstall") }
+                                    runGatewayAction(label: "Health Check") { await service.gatewayHealth() }
                                 } label: {
-                                    Label("Uninstall Service", systemImage: "trash")
+                                    Label("Health Check", systemImage: "heart.text.square")
                                 }
                                 .buttonStyle(.bordered)
-                                .controlSize(.small)
+                                .disabled(gatewayIsActing)
                             }
-                            .padding(.top, 4)
+
+                            // Advanced service management
+                            DisclosureGroup("Advanced") {
+                                HStack(spacing: 12) {
+                                    Button {
+                                        runGatewayAction(label: "Reinstall Service") { await service.installGateway() }
+                                    } label: {
+                                        Label("Reinstall Service", systemImage: "square.and.arrow.down")
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+
+                                    Button {
+                                        showUninstallGatewayConfirm = true
+                                    } label: {
+                                        Label("Uninstall Service", systemImage: "trash")
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+                                .padding(.top, 4)
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         }
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                     }
-                    .padding()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.controlBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
 
                     // Operation log
                     if !service.gatewayLog.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
+                        GroupBox {
+                            ScrollView {
+                                Text(service.gatewayLog)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .textSelection(.enabled)
+                            }
+                            .frame(maxHeight: 300)
+                        } label: {
                             HStack {
                                 Text("Operation Log")
-                                    .font(.headline)
                                 Spacer()
                                 if gatewayIsActing {
                                     ProgressView()
@@ -563,7 +561,6 @@ struct DashboardView: View {
                                 }
                                 Button {
                                     service.gatewayLog = ""
-                                    gatewayActionResult = ""
                                 } label: {
                                     Image(systemName: "trash")
                                         .font(.caption)
@@ -571,53 +568,54 @@ struct DashboardView: View {
                                 .buttonStyle(.plain)
                                 .foregroundStyle(.secondary)
                             }
-
-                            ScrollView {
-                                Text(service.gatewayLog)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .textSelection(.enabled)
-                            }
-                            .frame(maxHeight: 300)
                         }
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color(.textBackgroundColor))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
 
                     // Dashboard link
                     if service.gatewayStatus?.running == true {
                         let port = service.gatewayStatus?.gatewayPort ?? 18789
-                        HStack {
-                            Image(systemName: "globe")
-                            Text("Dashboard: http://127.0.0.1:\(port)/")
-                                .font(.callout)
-                            Spacer()
-                            Button("Open in Browser") {
-                                if let url = URL(string: "http://127.0.0.1:\(port)/") {
-                                    NSWorkspace.shared.open(url)
+                        GroupBox {
+                            HStack {
+                                Image(systemName: "globe")
+                                Text("Dashboard: http://127.0.0.1:\(port)/")
+                                    .font(.callout)
+                                Spacer()
+                                Button("Open in Browser") {
+                                    if let url = URL(string: "http://127.0.0.1:\(port)/") {
+                                        NSWorkspace.shared.open(url)
+                                    }
                                 }
+                                .buttonStyle(.bordered)
                             }
-                            .buttonStyle(.bordered)
                         }
-                        .padding()
-                        .background(Color(.controlBackgroundColor))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
                 }
                 .padding()
+        }
+        .navigationTitle("Gateway")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                if gatewayIsActing {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Button {
+                        Task { await service.fetchGatewayStatus() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .help("Refresh gateway status")
+                }
             }
         }
     }
 
-    private func runGatewayAction(_ action: @escaping () async -> CommandResult) {
+    private func runGatewayAction(label: String = "Action", _ action: @escaping () async -> CommandResult) {
         Task {
             gatewayIsActing = true
             let result = await action()
-            gatewayActionResult = result.output
-            gatewayActionIsError = result.exitCode != 0
             gatewayIsActing = false
+            toast.show(result.exitCode == 0 ? "\(label) completed successfully" : "\(label) failed: \(String(result.output.prefix(100)))", isError: result.exitCode != 0)
         }
     }
 
@@ -625,84 +623,57 @@ struct DashboardView: View {
 
     @State private var configProviderName = ""
     @State private var configApiKey = ""
-    @State private var modelConfigResult = ""
-    @State private var modelConfigIsError = false
+    @State private var modelsToast = ToastState()
     @State private var selectedModel = ""
 
     private var modelsView: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Models")
-                    .font(.title.bold())
-                Spacer()
-                Button {
-                    Task { await service.fetchModelsStatus() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-            }
-            .padding()
-
-            Divider()
-
-            ScrollView {
+        ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     // Current model config
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Active Configuration")
-                            .font(.headline)
+                    GroupBox("Active Configuration") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Default Model:")
+                                    .foregroundStyle(.secondary)
+                                Text(service.modelsStatus?.defaultModel ?? "Not set")
+                                    .font(.system(.body, design: .monospaced))
+                            }
 
-                        HStack {
-                            Text("Default Model:")
-                                .foregroundStyle(.secondary)
-                            Text(service.modelsStatus?.defaultModel ?? "Not set")
-                                .font(.system(.body, design: .monospaced))
-                        }
+                            HStack {
+                                Text("Fallback Models:")
+                                    .foregroundStyle(.secondary)
+                                Text(service.modelsStatus?.fallbacks?.joined(separator: ", ") ?? "Not set")
+                                    .font(.system(.body, design: .monospaced))
+                            }
 
-                        HStack {
-                            Text("Fallback Models:")
-                                .foregroundStyle(.secondary)
-                            Text(service.modelsStatus?.fallbacks?.joined(separator: ", ") ?? "Not set")
-                                .font(.system(.body, design: .monospaced))
-                        }
+                            // Set default model via dropdown
+                            HStack(spacing: 8) {
+                                ModelCatalogPicker(selection: $selectedModel)
+                                    .frame(maxWidth: .infinity)
 
-                        // Set default model via dropdown
-                        HStack(spacing: 8) {
-                            ModelCatalogPicker(selection: $selectedModel)
-                                .frame(maxWidth: .infinity)
-
-                            Button("Set Default") {
-                                Task {
-                                    let result = await service.setDefaultModel(selectedModel)
-                                    modelConfigResult = result.exitCode == 0
-                                        ? "Default model set to \(selectedModel)"
-                                        : result.output
-                                    modelConfigIsError = result.exitCode != 0
+                                Button("Set Default") {
+                                    Task {
+                                        let result = await service.setDefaultModel(selectedModel)
+                                        modelsToast.show(result.exitCode == 0 ? "Default model set to \(selectedModel)" : result.output, isError: result.exitCode != 0)
+                                    }
                                 }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(selectedModel.isEmpty)
+                                .buttonStyle(.borderedProminent)
+                                .disabled(selectedModel.isEmpty)
 
-                            Button {
-                                ModelCatalogStore.shared.refresh()
-                            } label: {
-                                Image(systemName: "arrow.clockwise")
+                                Button {
+                                    ModelCatalogStore.shared.refresh()
+                                } label: {
+                                    Image(systemName: "arrow.clockwise")
+                                }
+                                .buttonStyle(.bordered)
+                                .help("Refresh model list from OpenClaw")
                             }
-                            .buttonStyle(.bordered)
-                            .help("Refresh model list from OpenClaw")
+                            .padding(.top, 4)
                         }
-                        .padding(.top, 4)
                     }
-                    .padding()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.controlBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
 
                     // Providers with configure buttons
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Providers")
-                            .font(.headline)
-
+                    GroupBox("Providers") {
                         if let providers = service.modelsStatus?.providers, !providers.isEmpty {
                             ForEach(providers) { provider in
                                 providerRow(provider)
@@ -713,79 +684,55 @@ struct DashboardView: View {
                                 .font(.callout)
                         }
                     }
-                    .padding()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.controlBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
 
                     // Configure API Key
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Configure API Key")
-                            .font(.headline)
+                    GroupBox("Configure API Key") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Enter your API key to authenticate with a provider. The key is stored locally by OpenClaw.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
 
-                        Text("Enter your API key to authenticate with a provider. The key is stored locally by OpenClaw.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                            HStack(spacing: 8) {
+                                TextField("Provider (e.g. anthropic, openai)", text: $configProviderName)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 250)
 
-                        HStack(spacing: 8) {
-                            TextField("Provider (e.g. anthropic, openai)", text: $configProviderName)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 250)
+                                SecureField("API Key", text: $configApiKey)
+                                    .textFieldStyle(.roundedBorder)
 
-                            SecureField("API Key", text: $configApiKey)
-                                .textFieldStyle(.roundedBorder)
-
-                            Button("Save") {
-                                Task {
-                                    let result = await service.configureProvider(
-                                        provider: configProviderName,
-                                        apiKey: configApiKey
-                                    )
-                                    modelConfigResult = result.exitCode == 0
-                                        ? "\(configProviderName) API key configured successfully"
-                                        : result.output
-                                    modelConfigIsError = result.exitCode != 0
-                                    if result.exitCode == 0 {
-                                        configApiKey = ""
+                                Button("Save") {
+                                    Task {
+                                        let result = await service.configureProvider(
+                                            provider: configProviderName,
+                                            apiKey: configApiKey
+                                        )
+                                        modelsToast.show(result.exitCode == 0 ? "\(configProviderName) API key configured successfully" : result.output, isError: result.exitCode != 0)
+                                        if result.exitCode == 0 {
+                                            configApiKey = ""
+                                        }
                                     }
                                 }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(configProviderName.isEmpty || configApiKey.isEmpty)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(configProviderName.isEmpty || configApiKey.isEmpty)
-                        }
 
-                        // Quick provider buttons
-                        HStack(spacing: 8) {
-                            Text("Quick select:")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                            ForEach(["anthropic", "openai", "mistral", "openrouter", "huggingface"], id: \.self) { name in
-                                Button(name) {
-                                    configProviderName = name
+                            // Quick provider buttons
+                            HStack(spacing: 8) {
+                                Text("Quick select:")
+                                    .font(.caption)
+                                    .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                                ForEach(["anthropic", "openai", "mistral", "openrouter", "huggingface"], id: \.self) { name in
+                                    Button(name) {
+                                        configProviderName = name
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
                                 }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
                             }
                         }
                     }
-                    .padding()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.controlBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
 
-                    // Status message
-                    if !modelConfigResult.isEmpty {
-                        HStack(spacing: 6) {
-                            Image(systemName: modelConfigIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                            Text(modelConfigResult)
-                        }
-                        .font(.callout)
-                        .foregroundStyle(modelConfigIsError ? .red : .green)
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background((modelConfigIsError ? Color.red : Color.green).opacity(0.1))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                    }
+                    ToastBanner(toast: modelsToast)
 
                     // Model management actions
                     HStack(spacing: 12) {
@@ -806,23 +753,7 @@ struct DashboardView: View {
 
                     // Model catalog status
                     let catalog = ModelCatalogStore.shared
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Model Catalog")
-                                .font(.headline)
-                            Spacer()
-                            Text("\(catalog.models.count) models, \(catalog.providers.count) providers")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            if catalog.isLoading {
-                                ProgressView()
-                                    .controlSize(.small)
-                                Text("Loading...")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-
+                    GroupBox {
                         if !catalog.debugLog.isEmpty {
                             DisclosureGroup("Debug Log") {
                                 ScrollView {
@@ -836,13 +767,34 @@ struct DashboardView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         }
+                    } label: {
+                        HStack {
+                            Text("Model Catalog")
+                            Spacer()
+                            Text("\(catalog.models.count) models, \(catalog.providers.count) providers")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if catalog.isLoading {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Loading...")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     }
-                    .padding()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.controlBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
                 }
                 .padding()
+        }
+        .navigationTitle("Models")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    Task { await service.fetchModelsStatus() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Refresh models status")
             }
         }
     }
@@ -850,7 +802,7 @@ struct DashboardView: View {
     private func providerRow(_ provider: ProviderStatus) -> some View {
         HStack(spacing: 10) {
             Image(systemName: provider.authenticated == true ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundStyle(provider.authenticated == true ? .green : .red)
+                .foregroundStyle(provider.authenticated == true ? Color.green : Color.red)
                 .font(.title3)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -870,69 +822,10 @@ struct DashboardView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
             } else {
-                Text("Connected")
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.green.opacity(0.15))
-                    .foregroundStyle(.green)
-                    .clipShape(Capsule())
+                StatusBadge(label: "Connected", color: Color.green)
             }
         }
-        .padding(10)
-        .background(Color(.textBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-
-    // MARK: - Terminal View
-
-    private var terminalView: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Terminal")
-                    .font(.title.bold())
-                Spacer()
-                if service.isRunningCommand {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Running...")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding()
-
-            Divider()
-
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(service.commandHistory) { result in
-                        commandResultView(result)
-                    }
-                }
-                .padding()
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(.textBackgroundColor))
-
-            Divider()
-
-            HStack(spacing: 8) {
-                Text("$")
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.green)
-
-                TextField("Enter command...", text: $customCommand)
-                    .textFieldStyle(.plain)
-                    .font(.system(.body, design: .monospaced))
-                    .onSubmit { runCustomCommand() }
-
-                Button("Run") { runCustomCommand() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(customCommand.isEmpty || service.isRunningCommand)
-            }
-            .padding()
-        }
+        .padding(6)
     }
 
     // MARK: - Add Agent Sheet
@@ -968,7 +861,7 @@ struct DashboardView: View {
             if !addAgentError.isEmpty {
                 Text(addAgentError)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Color.red)
             }
 
             HStack {
@@ -982,9 +875,11 @@ struct DashboardView: View {
                         )
                         if result.exitCode == 0 {
                             showAddAgent = false
+                            let createdName = newAgentName
                             newAgentName = ""
                             newAgentWorkspace = ""
                             addAgentError = ""
+                            toast.show("Agent \"\(createdName)\" created successfully")
                         } else {
                             addAgentError = result.output
                         }
@@ -996,50 +891,221 @@ struct DashboardView: View {
         }
         .padding(24)
         .frame(width: 420)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     // MARK: - Helpers
 
-    private func commandResultView(_ result: CommandResult) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("$ \(result.command)")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.green)
-                Spacer()
-                Text(result.timestamp, style: .time)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                if result.exitCode != 0 {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
-                        .font(.caption)
-                }
-            }
-
-            Text(result.output.isEmpty ? "(no output)" : result.output)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(result.exitCode == 0 ? Color.primary : Color.red)
-                .textSelection(.enabled)
-        }
-        .padding(8)
-        .background(Color.black.opacity(0.3))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-    }
-
-    private func runCustomCommand() {
-        guard !customCommand.isEmpty else { return }
-        let cmd = customCommand
-        customCommand = ""
-        Task { await service.runCommand(cmd) }
-    }
-
     private func agentColor(_ status: AgentStatus) -> Color {
         switch status {
-        case .online, .working: return .green
-        case .idle: return .yellow
-        case .offline: return .red
-        case .unknown: return .gray
+        case .online, .working: return Color.green
+        case .idle: return Color.yellow
+        case .offline: return Color.red
+        case .unknown: return Color(nsColor: .tertiaryLabelColor)
         }
     }
 }
+// MARK: - Sessions List View
+
+struct SessionsListView: View {
+    @Bindable var service: OpenClawService
+    var onOpenSession: (Agent, String) -> Void
+
+    @State private var gateway = GatewayWebSocket()
+    @State private var gatewaySessions: [GatewaySession] = []
+    @State private var cliSessions: [AgentSession] = []
+    @State private var isLoading = true
+    @State private var filterAgent = ""
+    @State private var usingGateway = false
+
+    private var filteredSessions: [GatewaySession] {
+        if filterAgent.isEmpty {
+            return gatewaySessions
+        }
+        return gatewaySessions.filter { $0.agentId == filterAgent }
+    }
+
+    private var agentIds: [String] {
+        Array(Set(gatewaySessions.compactMap(\.agentId))).sorted()
+    }
+
+    var body: some View {
+        Group {
+            if isLoading && gatewaySessions.isEmpty {
+                LoadingStateView(message: "Loading sessions...")
+            } else if filteredSessions.isEmpty {
+                EmptyStateView(
+                    icon: "bubble.left.and.bubble.right",
+                    title: "No Sessions",
+                    message: "No conversation sessions found. Send a message to an agent to start one."
+                )
+            } else {
+                List {
+                    ForEach(filteredSessions) { session in
+                        sessionRow(session)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Sessions")
+        .navigationSubtitle("\(filteredSessions.count) session\(filteredSessions.count == 1 ? "" : "s")")
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                ConnectionBadge(isConnected: usingGateway, connectedLabel: "Gateway", offlineLabel: "CLI")
+            }
+            ToolbarItem(placement: .automatic) {
+                Picker("Agent", selection: $filterAgent) {
+                    Text("All Agents").tag("")
+                    ForEach(agentIds, id: \.self) { agentId in
+                        Text(agentId).tag(agentId)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 180)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    Task { await loadSessions() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .disabled(isLoading)
+                .help("Refresh sessions")
+            }
+        }
+        .task {
+            gateway.connect()
+            // Give the gateway a moment to connect
+            try? await Task.sleep(for: .seconds(1))
+            await loadSessions()
+        }
+    }
+
+    private func sessionRow(_ session: GatewaySession) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "bubble.left.fill")
+                .font(.title3)
+                .foregroundStyle(Color.accentColor)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    if let agentId = session.agentId {
+                        Text(agentId)
+                            .font(.callout.bold())
+                    }
+                    if let displayName = session.displayName {
+                        StatusBadge(label: displayName, color: Color.accentColor)
+                    }
+                }
+
+                Text(session.key)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                HStack(spacing: 8) {
+                    if let model = session.model {
+                        Label(model, systemImage: "cpu")
+                            .font(.caption2)
+                            .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                            .lineLimit(1)
+                    }
+                    if let totalTokens = session.totalTokens {
+                        Label("\(totalTokens) tokens", systemImage: "number")
+                            .font(.caption2)
+                            .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                    }
+                    if let updatedAt = session.updatedAt {
+                        Text(formatDate(updatedAt))
+                            .font(.caption2)
+                            .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                    }
+                }
+            }
+
+            Spacer()
+
+            Button("Open Chat") {
+                openSession(session)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button("Open Chat") {
+                openSession(session)
+            }
+            Divider()
+            Button("Copy Session ID") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(session.key, forType: .string)
+            }
+        }
+    }
+
+    private func openSession(_ session: GatewaySession) {
+        guard let agentId = session.agentId else { return }
+        // Pass the session key — AgentDetailView can match by key or sessionId
+        let id = session.key
+
+        if let agent = service.agents.first(where: { $0.name == agentId }) {
+            onOpenSession(agent, id)
+        }
+    }
+
+    private func loadSessions() async {
+        isLoading = true
+
+        // Try gateway first for real-time data
+        if gateway.isConnected {
+            do {
+                let response = try await gateway.sessionsList()
+                gatewaySessions = (response.sessions ?? [])
+                    .sorted { ($0.updatedAt ?? 0) > ($1.updatedAt ?? 0) }
+                usingGateway = true
+                isLoading = false
+                return
+            } catch {
+                print("[Sessions] Gateway failed: \(error), falling back to CLI")
+            }
+        }
+
+        // Fallback: use CLI sessions and convert to GatewaySession format
+        let cli = await service.fetchSessions()
+        gatewaySessions = cli.map { s in
+            GatewaySession(
+                key: s.key,
+                kind: s.kind,
+                displayName: nil,
+                chatType: nil,
+                origin: nil,
+                updatedAt: s.updatedAt,
+                sessionId: s.sessionId,
+                systemSent: nil,
+                abortedLastRun: nil,
+                inputTokens: nil,
+                outputTokens: nil,
+                totalTokens: nil,
+                totalTokensFresh: nil,
+                modelProvider: nil,
+                model: s.model,
+                contextTokens: nil,
+                lastChannel: nil
+            )
+        }
+        .sorted { ($0.updatedAt ?? 0) > ($1.updatedAt ?? 0) }
+        usingGateway = false
+        isLoading = false
+    }
+
+    private func formatDate(_ timestamp: Double) -> String {
+        let date = Date(timeIntervalSince1970: timestamp / 1000)
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+}
+

@@ -1,5 +1,7 @@
 import SwiftUI
 
+// MARK: - Onboarding View
+
 struct OnboardingView: View {
     @Bindable var appState: AppState
     @State private var shell = ShellService()
@@ -7,213 +9,312 @@ struct OnboardingView: View {
     @State private var log = ""
     @State private var showError = false
     @State private var errorMessage = ""
+    @State private var copied = false
+    @State private var waitingForTerminal = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            progressBar
-                .padding(.horizontal, 40)
-                .padding(.top, 32)
-                .padding(.bottom, 16)
+        NavigationSplitView {
+            sidebarContent
+                .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 280)
+                .navigationTitle("Setup")
+        } detail: {
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(spacing: 24) {
+                        // Step icon and title
+                        VStack(spacing: 8) {
+                            Image(systemName: appState.currentStep.icon)
+                                .font(.largeTitle)
+                                .foregroundStyle(.accent)
 
-            Spacer()
+                            Text(appState.currentStep.title)
+                                .font(.title.bold())
 
-            stepContent
-                .frame(maxWidth: 480)
+                            Text(appState.currentStep.subtitle)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .padding(.top, 20)
 
-            Spacer()
+                        // Step content
+                        stepContent
 
-            if !log.isEmpty {
-                logView
-                    .padding(.horizontal, 40)
-                    .padding(.bottom, 16)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.windowBackgroundColor))
-    }
+                        // Error display
+                        if showError {
+                            GroupBox {
+                                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.red)
+                            }
+                        }
+                    }
+                    .padding(24)
+                }
 
-    // MARK: - Progress Bar
-
-    private var progressBar: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 4) {
-                ForEach(0..<OnboardingStep.totalSteps, id: \.self) { index in
-                    let step = OnboardingStep(rawValue: index)!
-                    let isCurrent = step == appState.currentStep
-                    let isComplete = step.rawValue < appState.currentStep.rawValue
-
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(isComplete ? Color.green : (isCurrent ? Color.accentColor : Color.secondary.opacity(0.2)))
-                        .frame(height: 4)
-                        .animation(.easeInOut, value: appState.currentStep)
+                if !log.isEmpty {
+                    logPanel
                 }
             }
+        }
+        .animation(.easeInOut(duration: 0.3), value: appState.currentStep)
+    }
 
-            HStack {
-                Text("Step \(appState.currentStep.stepNumber) of \(OnboardingStep.totalSteps)")
+    // MARK: - Sidebar
+
+    private var sidebarContent: some View {
+        List {
+            ForEach(0..<OnboardingStep.totalSteps, id: \.self) { index in
+                let step = OnboardingStep(rawValue: index)!
+                let isCurrent = step == appState.currentStep
+                let isComplete = step.rawValue < appState.currentStep.rawValue
+
+                HStack(spacing: 10) {
+                    ZStack {
+                        if isComplete {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        } else if isCurrent {
+                            Image(systemName: "\(index + 1).circle.fill")
+                                .foregroundStyle(.accent)
+                        } else {
+                            Image(systemName: "\(index + 1).circle")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .font(.title3)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(step.title)
+                            .font(isCurrent ? .callout.bold() : .callout)
+                            .foregroundStyle(isComplete ? .green : isCurrent ? .primary : .secondary)
+                        Text(step.sidebarDescription)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            Section {
+                Label("Private & Local", systemImage: "lock.shield")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Spacer()
+                Text("All data stays on your machine.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
         }
     }
 
     // MARK: - Step Content
 
+    @ViewBuilder
     private var stepContent: some View {
-        VStack(spacing: 24) {
-            Image(systemName: appState.currentStep.icon)
-                .font(.system(size: 48))
-                .foregroundStyle(.tint)
-
-            VStack(spacing: 8) {
-                Text(appState.currentStep.title)
-                    .font(.largeTitle.bold())
-
-                Text(appState.currentStep.subtitle)
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-
-            Group {
-                switch appState.currentStep {
-                case .installNode:
-                    installNodeStep
-                case .installOpenClaw:
-                    installOpenClawStep
-                case .onboard:
-                    onboardStep
-                }
-            }
-
-            if showError {
-                Text(errorMessage)
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-            }
-        }
-        .padding(32)
-    }
-
-    // MARK: - Step 1: Node.js
-
-    private var installNodeStep: some View {
-        VStack(spacing: 16) {
-            actionButton("Install with Homebrew", icon: "cup.and.saucer.fill") {
-                await runStep {
-                    appendLog("$ brew install node")
-                    let result = await shell.run("brew install node 2>&1")
-                    appendLog(result.output)
-                    guard result.exitCode == 0 else {
-                        throw StepError.failed("Homebrew install failed. Make sure Homebrew is installed, or install Node.js manually from nodejs.org")
-                    }
-                    await appState.checkNode()
-                    guard appState.nodeInstalled else {
-                        throw StepError.failed("Node.js installation could not be verified.")
-                    }
-                }
-            }
-
-            manualCommandView(
-                "Or install manually from nodejs.org",
-                command: "brew install node"
-            )
-
-            recheckButton {
-                await appState.checkNode()
-            }
+        switch appState.currentStep {
+        case .xcodeTools: xcodeToolsContent
+        case .homebrew: homebrewContent
+        case .installOpenClaw: installOpenClawContent
+        case .onboard: onboardContent
+        case .startGateway: startGatewayContent
         }
     }
 
-    // MARK: - Step 2: OpenClaw
+    // MARK: - Step 1: Xcode Command Line Tools
 
-    private var installOpenClawStep: some View {
-        VStack(spacing: 16) {
-            completedBadge("Node.js \(appState.nodeVersion)")
+    private var xcodeToolsContent: some View {
+        VStack(spacing: 14) {
+            infoRow(icon: "wrench.and.screwdriver", text: "Includes Git, compilers, and macOS build utilities")
 
-            actionButton("Install OpenClaw", icon: "arrow.down.circle.fill") {
+            actionButton("Install Xcode Tools", icon: "hammer.fill") {
                 await runStep {
-                    appendLog("$ curl -fsSL https://openclaw.ai/install.sh | bash")
-                    appendLog("Downloading and installing...")
-                    let result = await shell.run("curl -fsSL https://openclaw.ai/install.sh | bash 2>&1")
+                    appendLog("$ xcode-select --install")
+                    appendLog("Opening macOS installer dialog...")
+                    let result = await shell.run("xcode-select --install 2>&1")
                     appendLog(result.output)
-
-                    if result.exitCode != 0 {
-                        // Fallback to npm
-                        appendLog("\nCurl install failed, trying npm...")
-                        appendLog("$ npm install -g openclaw@latest")
-                        let npmResult = await shell.run("npm install -g openclaw@latest 2>&1")
-                        appendLog(npmResult.output)
-                        guard npmResult.exitCode == 0 else {
-                            throw StepError.failed(
-                                "Installation failed. Open Terminal and run:\ncurl -fsSL https://openclaw.ai/install.sh | bash"
-                            )
+                    appendLog("Waiting for installation to complete (this may take several minutes)...")
+                    for _ in 0..<120 {
+                        try await Task.sleep(for: .seconds(5))
+                        await appState.checkXcodeTools()
+                        if appState.xcodeToolsInstalled {
+                            appendLog("Xcode Command Line Tools installed successfully.")
+                            return
                         }
                     }
-
-                    await appState.checkOpenClaw()
-                    guard appState.openclawInstalled else {
-                        throw StepError.failed("OpenClaw could not be found after installation.")
-                    }
+                    throw StepError.failed("Timed out. Complete the system dialog and click Recheck below.")
                 }
             }
 
-            manualCommandView(
-                "Or install from Terminal",
-                command: "curl -fsSL https://openclaw.ai/install.sh | bash"
-            )
+            terminalBlock("xcode-select --install")
 
-            recheckButton {
-                await appState.checkOpenClaw()
+            recheckButton("I already have Xcode Tools") {
+                await appState.checkXcodeTools()
             }
         }
     }
 
-    // MARK: - Step 3: Onboard
+    // MARK: - Step 2: Homebrew
 
-    private var onboardStep: some View {
-        VStack(spacing: 16) {
-            completedBadge("OpenClaw \(appState.openclawVersion)")
+    private var homebrewContent: some View {
+        VStack(spacing: 14) {
+            doneBadge("Xcode Tools")
 
-            Text("The onboarding wizard will walk you through setting up your AI provider, gateway, and messaging channels.")
+            infoRow(icon: "shippingbox", text: "Homebrew is used to install Node.js and other dependencies")
+
+            if waitingForTerminal {
+                waitingForTerminalView(
+                    message: "Complete the Homebrew installation in Terminal, then come back here.",
+                    recheckAction: {
+                        await appState.checkBrew()
+                        if appState.brewInstalled {
+                            waitingForTerminal = false
+                        }
+                    }
+                )
+            } else {
+                actionButton("Install Homebrew", icon: "mug.fill") {
+                    shell.openInTerminal("/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"")
+                    waitingForTerminal = true
+                    await pollUntil {
+                        await appState.checkBrew()
+                        return appState.brewInstalled
+                    }
+                    waitingForTerminal = false
+                }
+
+                terminalBlock("/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"")
+
+                recheckButton("I already have Homebrew") {
+                    await appState.checkBrew()
+                }
+            }
+        }
+    }
+
+    // MARK: - Step 3: Install OpenClaw
+
+    private var installOpenClawContent: some View {
+        VStack(spacing: 14) {
+            HStack(spacing: 8) {
+                doneBadge("Xcode Tools")
+                doneBadge(appState.brewVersion.isEmpty ? "Homebrew" : appState.brewVersion)
+            }
+
+            infoRow(icon: "cube.box", text: "Installs OpenClaw CLI, Node.js 22+, and all dependencies")
+
+            if waitingForTerminal {
+                waitingForTerminalView(
+                    message: "Complete the OpenClaw installation in Terminal, then come back here.",
+                    recheckAction: {
+                        await appState.checkNode()
+                        await appState.checkOpenClaw()
+                        if appState.openclawInstalled {
+                            waitingForTerminal = false
+                        }
+                    }
+                )
+            } else {
+                actionButton("Install OpenClaw", icon: "arrow.down.circle.fill") {
+                    shell.openInTerminal("curl -fsSL https://openclaw.ai/install.sh | bash")
+                    waitingForTerminal = true
+                    await pollUntil {
+                        await appState.checkNode()
+                        await appState.checkOpenClaw()
+                        return appState.openclawInstalled
+                    }
+                    waitingForTerminal = false
+                }
+
+                terminalBlock("curl -fsSL https://openclaw.ai/install.sh | bash")
+
+                recheckButton("I already have OpenClaw") {
+                    await appState.checkNode()
+                    await appState.checkOpenClaw()
+                }
+            }
+        }
+    }
+
+    // MARK: - Step 4: Onboard
+
+    private var onboardContent: some View {
+        VStack(spacing: 14) {
+            doneBadge("OpenClaw \(appState.openclawVersion)")
+
+            Text("The wizard will walk you through connecting your AI provider keys, configuring the gateway, and setting up channels.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            actionButton("Launch Setup Wizard", icon: "wand.and.stars") {
-                await runStep {
-                    appendLog("$ openclaw onboard --install-daemon")
-                    appendLog("Starting onboarding wizard...")
-                    let result = await shell.run("openclaw onboard --install-daemon 2>&1")
-                    appendLog(result.output)
-                    guard result.exitCode == 0 else {
-                        throw StepError.failed("Onboarding failed. You can run 'openclaw onboard' in Terminal instead.")
+            if waitingForTerminal {
+                waitingForTerminalView(
+                    message: "Complete the setup wizard in Terminal, then come back here.",
+                    recheckAction: {
+                        await appState.checkOnboarded()
+                        await appState.checkGateway()
+                        if appState.onboarded {
+                            waitingForTerminal = false
+                        }
                     }
-                    await appState.checkAll()
+                )
+            } else {
+                actionButton("Launch Setup Wizard", icon: "wand.and.stars") {
+                    shell.openInTerminal("openclaw onboard --install-daemon")
+                    waitingForTerminal = true
+                    await pollUntil {
+                        await appState.checkOnboarded()
+                        return appState.onboarded
+                    }
+                    waitingForTerminal = false
+                }
+
+                terminalBlock("openclaw onboard --install-daemon")
+
+                recheckButton("I've already run onboard") {
+                    await appState.checkOnboarded()
+                    await appState.checkGateway()
+                }
+            }
+        }
+    }
+
+    // MARK: - Step 5: Start Gateway
+
+    private var startGatewayContent: some View {
+        VStack(spacing: 14) {
+            doneBadge("OpenClaw \(appState.openclawVersion)")
+
+            Text("The gateway connects your agents to AI providers and channels. It runs as a background service.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            actionButton("Start Gateway", icon: "bolt.fill") {
+                await runStep {
+                    appendLog("$ openclaw gateway start")
+                    let result = await shell.run("openclaw gateway start 2>&1")
+                    appendLog(result.output)
+                    try await Task.sleep(for: .seconds(2))
+                    await appState.checkGateway()
+                    guard appState.gatewayRunning else {
+                        throw StepError.failed("Gateway didn't start. Check the output or run 'openclaw gateway start' in Terminal.")
+                    }
                 }
             }
 
-            manualCommandView(
-                "Or run in Terminal for interactive setup",
-                command: "openclaw onboard --install-daemon"
-            )
+            terminalBlock("openclaw gateway start")
 
-            // Skip to dashboard
-            Button("Skip — go to Dashboard") {
-                // Mark as set up so ContentView shows dashboard
-                appState.openclawInstalled = true
+            Button("Skip to Dashboard") {
+                appState.gatewayRunning = true
+                appState.onboarded = true
                 appState.isChecking = false
             }
-            .buttonStyle(.plain)
-            .font(.caption)
+            .buttonStyle(.borderless)
             .foregroundStyle(.secondary)
         }
     }
 
-    // MARK: - Shared Components
+    // MARK: - Components
 
     private func actionButton(
         _ title: String,
@@ -232,101 +333,163 @@ struct OnboardingView: View {
                 }
                 Text(isWorking ? "Working..." : title)
             }
-            .frame(minWidth: 220)
+            .frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
         .disabled(isWorking)
     }
 
-    private func completedBadge(_ text: String) -> some View {
+    private func doneBadge(_ text: String) -> some View {
         Label(text, systemImage: "checkmark.circle.fill")
             .font(.caption)
             .foregroundStyle(.green)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(.green.opacity(0.1))
+            .clipShape(Capsule())
     }
 
-    private func manualCommandView(_ label: String, command: String) -> some View {
-        VStack(spacing: 6) {
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 6) {
+    private func terminalBlock(_ command: String) -> some View {
+        GroupBox {
+            HStack(spacing: 8) {
+                Text("$")
+                    .font(.system(.caption, design: .monospaced).bold())
+                    .foregroundStyle(.secondary)
                 Text(command)
                     .font(.system(.caption, design: .monospaced))
                     .lineLimit(1)
                     .truncationMode(.middle)
-
+                Spacer()
                 Button {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(command, forType: .string)
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        copied = false
+                    }
                 } label: {
-                    Image(systemName: "doc.on.doc")
-                        .font(.caption2)
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.caption)
+                        .foregroundStyle(copied ? .green : .secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Copy to clipboard")
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Color(.controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
         }
     }
 
-    private func recheckButton(check: @escaping () async -> Void) -> some View {
-        Button("I already have this — recheck") {
+    private func infoRow(icon: String, text: String) -> some View {
+        Label(text, systemImage: icon)
+            .font(.callout)
+            .foregroundStyle(.secondary)
+    }
+
+    private func recheckButton(_ label: String, action: @escaping () async -> Void) -> some View {
+        Button {
             Task {
                 isWorking = true
                 showError = false
-                await check()
+                await action()
                 isWorking = false
             }
+        } label: {
+            Label(label, systemImage: "arrow.clockwise")
         }
-        .buttonStyle(.plain)
-        .font(.caption)
-        .foregroundStyle(.secondary)
+        .buttonStyle(.borderless)
     }
 
-    private var logView: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Output")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Clear") { log = "" }
-                    .font(.caption)
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-            }
+    private func waitingForTerminalView(
+        message: String,
+        recheckAction: @escaping () async -> Void
+    ) -> some View {
+        GroupBox {
+            VStack(spacing: 12) {
+                HStack(spacing: 10) {
+                    Image(systemName: "terminal.fill")
+                        .font(.title3)
+                        .foregroundStyle(.accent)
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(log)
-                        .font(.system(.caption2, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .id("logBottom")
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Waiting for Terminal")
+                            .font(.headline)
+                        Text(message)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    ProgressView()
+                        .controlSize(.small)
                 }
-                .onChange(of: log) {
-                    proxy.scrollTo("logBottom", anchor: .bottom)
+
+                HStack(spacing: 12) {
+                    recheckButton("Recheck now") {
+                        await recheckAction()
+                    }
+
+                    Button {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"))
+                    } label: {
+                        Label("Open Terminal", systemImage: "macwindow")
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
-            .frame(maxHeight: 120)
-            .padding(8)
-            .background(Color.black.opacity(0.05))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
         }
+    }
+
+    // MARK: - Log Panel
+
+    private var logPanel: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Label("Terminal Output", systemImage: "terminal")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button { log = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Divider()
+
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Text(log)
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                            .id("logEnd")
+                    }
+                    .onChange(of: log) {
+                        proxy.scrollTo("logEnd", anchor: .bottom)
+                    }
+                }
+                .frame(maxHeight: 140)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.bottom, 12)
     }
 
     // MARK: - Helpers
+
+    private func pollUntil(_ condition: @escaping () async -> Bool) async {
+        for _ in 0..<120 {
+            try? await Task.sleep(for: .seconds(5))
+            if await condition() { return }
+        }
+    }
 
     private func runStep(_ work: () async throws -> Void) async {
         isWorking = true
         showError = false
         errorMessage = ""
-
         do {
             try await work()
         } catch let error as StepError {
@@ -336,7 +499,6 @@ struct OnboardingView: View {
             showError = true
             errorMessage = error.localizedDescription
         }
-
         isWorking = false
     }
 
@@ -348,10 +510,36 @@ struct OnboardingView: View {
 
 private enum StepError: Error {
     case failed(String)
-
     var message: String {
         switch self {
         case .failed(let msg): return msg
         }
     }
+}
+
+// MARK: - Previews
+
+#Preview("Step 1 - Xcode Tools") {
+    OnboardingView(appState: .preview(step: .xcodeTools))
+        .frame(width: 840, height: 600)
+}
+
+#Preview("Step 2 - Homebrew") {
+    OnboardingView(appState: .preview(step: .homebrew))
+        .frame(width: 840, height: 600)
+}
+
+#Preview("Step 3 - OpenClaw") {
+    OnboardingView(appState: .preview(step: .installOpenClaw))
+        .frame(width: 840, height: 600)
+}
+
+#Preview("Step 4 - Onboard") {
+    OnboardingView(appState: .preview(step: .onboard))
+        .frame(width: 840, height: 600)
+}
+
+#Preview("Step 5 - Gateway") {
+    OnboardingView(appState: .preview(step: .startGateway))
+        .frame(width: 840, height: 600)
 }

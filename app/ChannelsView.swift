@@ -20,59 +20,45 @@ struct ChannelsView: View {
     @State private var channelListOutput = ""
     @State private var statusOutput = ""
     @State private var isLoading = false
-    @State private var actionResult = ""
-    @State private var actionIsError = false
+    @State private var toast = ToastState()
+    @State private var loadingChannel: String?
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Channels")
-                    .font(.title.bold())
-                Spacer()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                // Status summary
+                if !statusOutput.isEmpty {
+                    GroupBox("Live Status") {
+                        Text(statusOutput)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+
+                // Channel cards
+                Text("Messaging Platforms")
+                    .font(.headline)
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 220))], spacing: 12) {
+                    ForEach(supportedChannels, id: \.0) { key, name, icon in
+                        channelCard(key: key, name: name, icon: icon)
+                    }
+                }
+
+                ToastBanner(toast: toast)
+            }
+            .padding()
+        }
+        .navigationTitle("Channels")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     Task { await refresh() }
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
-            }
-            .padding()
-
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    // Status summary
-                    if !statusOutput.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Live Status")
-                                .font(.headline)
-                            Text(statusOutput)
-                                .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
-                        }
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color(.controlBackgroundColor))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                    }
-
-                    // Channel cards
-                    Text("Messaging Platforms")
-                        .font(.headline)
-
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 220))], spacing: 12) {
-                        ForEach(supportedChannels, id: \.0) { key, name, icon in
-                            channelCard(key: key, name: name, icon: icon)
-                        }
-                    }
-
-                    if !actionResult.isEmpty {
-                        Text(actionResult)
-                            .font(.callout)
-                            .foregroundStyle(actionIsError ? .red : .green)
-                    }
-                }
-                .padding()
+                .help("Refresh channels")
             }
         }
         .task {
@@ -81,49 +67,61 @@ struct ChannelsView: View {
     }
 
     private func channelCard(key: String, name: String, icon: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: icon)
-                    .font(.title3)
-                    .foregroundStyle(.tint)
-                Text(name)
-                    .font(.headline)
-                Spacer()
-            }
-
-            HStack(spacing: 8) {
-                Button("Login") {
-                    Task {
-                        isLoading = true
-                        let result = await service.channelLogin(channel: key)
-                        actionResult = result.exitCode == 0
-                            ? "\(name) login initiated"
-                            : result.output
-                        actionIsError = result.exitCode != 0
-                        isLoading = false
-                        await refresh()
-                    }
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: icon)
+                        .font(.title3)
+                        .foregroundStyle(Color.accentColor)
+                    Text(name)
+                        .font(.headline)
+                    Spacer()
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
 
-                Button("Logout") {
-                    Task {
-                        let result = await service.channelLogout(channel: key)
-                        actionResult = result.exitCode == 0
-                            ? "\(name) logged out"
-                            : result.output
-                        actionIsError = result.exitCode != 0
-                        await refresh()
+                HStack(spacing: 8) {
+                    Button {
+                        Task {
+                            loadingChannel = key
+                            let result = await service.channelLogin(channel: key)
+                            toast.show(
+                                result.exitCode == 0 ? "\(name) login initiated" : result.output,
+                                isError: result.exitCode != 0
+                            )
+                            loadingChannel = nil
+                            await refresh()
+                        }
+                    } label: {
+                        if loadingChannel == key {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("Login")
+                        }
                     }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(loadingChannel != nil)
+
+                    Button {
+                        Task {
+                            loadingChannel = key
+                            let result = await service.channelLogout(channel: key)
+                            toast.show(
+                                result.exitCode == 0 ? "\(name) logged out" : result.output,
+                                isError: result.exitCode != 0
+                            )
+                            loadingChannel = nil
+                            await refresh()
+                        }
+                    } label: {
+                        Text("Logout")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(loadingChannel != nil)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
         }
-        .padding(12)
-        .background(Color(.controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     private func refresh() async {

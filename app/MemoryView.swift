@@ -10,72 +10,43 @@ struct MemoryView: View {
     @State private var selectedAgent: String?
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Memory")
-                    .font(.title.bold())
-                Spacer()
-                Button {
-                    Task { await fetchStatus() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                // Status card
+                GroupBox("Memory Status") {
+                    if statusOutput.isEmpty {
+                        Text("Loading...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Text(statusOutput)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
-            }
-            .padding()
 
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    // Status card
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Memory Status")
-                                .font(.headline)
-                            Spacer()
-                            if isLoading {
-                                ProgressView()
-                                    .controlSize(.small)
-                            }
+                // Actions
+                HStack(spacing: 12) {
+                    Button {
+                        Task {
+                            isLoading = true
+                            let result = await service.memoryIndex()
+                            statusOutput = result.output
+                            isLoading = false
                         }
-
-                        if statusOutput.isEmpty {
-                            Text("Loading...")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text(statusOutput)
-                                .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
-                        }
+                    } label: {
+                        Label("Rebuild Index", systemImage: "arrow.triangle.2.circlepath")
                     }
-                    .padding()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.controlBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .buttonStyle(.bordered)
+                }
 
-                    // Actions
-                    HStack(spacing: 12) {
-                        Button {
-                            Task {
-                                isLoading = true
-                                let result = await service.memoryIndex()
-                                statusOutput = result.output
-                                isLoading = false
-                            }
-                        } label: {
-                            Label("Rebuild Index", systemImage: "arrow.triangle.2.circlepath")
-                        }
-                        .buttonStyle(.bordered)
-                    }
+                Divider()
 
-                    Divider()
-
-                    // Search
+                // Search
+                GroupBox("Search Memory") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Search Memory")
-                            .font(.headline)
-
                         HStack {
                             TextField("What do you want to find?", text: $searchQuery)
                                 .textFieldStyle(.roundedBorder)
@@ -101,22 +72,33 @@ struct MemoryView: View {
                         }
 
                         if !searchResults.isEmpty {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Results")
-                                    .font(.subheadline.bold())
-
-                                Text(searchResults)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .textSelection(.enabled)
-                            }
-                            .padding()
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(.controlBackgroundColor))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            Divider()
+                            Text("Results")
+                                .font(.subheadline.bold())
+                            Text(searchResults)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
                 }
-                .padding()
+            }
+            .padding()
+        }
+        .navigationTitle("Memory")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Button {
+                        Task { await fetchStatus() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .help("Refresh memory status")
+                }
             }
         }
         .task {

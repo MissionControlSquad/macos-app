@@ -65,6 +65,7 @@ struct AddAgentView: View {
                             if isCreating {
                                 ProgressView()
                                     .controlSize(.small)
+                                    .tint(Color.accentColor)
                             }
                             Text(isCreating ? "Creating..." : "Create Agent")
                         }
@@ -76,7 +77,7 @@ struct AddAgentView: View {
                     if !resultMessage.isEmpty {
                         Text(resultMessage)
                             .font(.callout)
-                            .foregroundStyle(resultIsError ? .red : .green)
+                            .foregroundStyle(resultIsError ? Color.red : Color.green)
                     }
                 }
             }
