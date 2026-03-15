@@ -152,11 +152,24 @@ struct APIKeySheet: View {
     var description: String = "Select a provider and enter your API key."
     var initialProvider: String = ""
     var onSave: (String, String) async -> Bool  // (provider, apiKey) -> success
+    var onValidate: ((String) async -> ProviderStatus?)? = nil  // (provider) -> status
     var onDismiss: () -> Void
+
+    enum ValidationState: Equatable {
+        case idle
+        case saving
+        case validating
+        case valid
+        case invalid(String)
+    }
 
     @State private var provider: String = ""
     @State private var apiKey: String = ""
-    @State private var isSaving = false
+    @State private var validation: ValidationState = .idle
+
+    private var isBusy: Bool {
+        validation == .saving || validation == .validating
+    }
 
     var body: some View {
         VStack(spacing: 20) {
@@ -179,6 +192,50 @@ struct APIKeySheet: View {
                 }
             }
 
+            // Validation result
+            switch validation {
+            case .saving:
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Saving key…")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            case .validating:
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Validating key…")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            case .valid:
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text("API key is valid")
+                        .font(.callout)
+                        .foregroundStyle(.green)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.green.opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            case .invalid(let reason):
+                HStack(spacing: 8) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                    Text(reason)
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.red.opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            case .idle:
+                EmptyView()
+            }
+
             HStack {
                 Button("Cancel") {
                     onDismiss()
@@ -186,22 +243,50 @@ struct APIKeySheet: View {
                 .keyboardShortcut(.escape, modifiers: [])
                 .buttonStyle(.bordered)
 
-                Button(isSaving ? "Saving..." : "Save") {
-                    Task {
-                        isSaving = true
-                        let success = await onSave(provider, apiKey)
-                        isSaving = false
-                        if success { onDismiss() }
+                if validation == .valid {
+                    Button("Done") {
+                        onDismiss()
                     }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.return, modifiers: [])
+                } else {
+                    Button("Save & Validate") {
+                        Task {
+                            validation = .saving
+                            let success = await onSave(provider, apiKey)
+                            if success {
+                                if let onValidate {
+                                    validation = .validating
+                                    let status = await onValidate(provider)
+                                    if status?.authenticated == true {
+                                        validation = .valid
+                                    } else {
+                                        validation = .invalid("Key saved but validation failed. The key may be incorrect or the provider may be unreachable.")
+                                    }
+                                } else {
+                                    // No validate callback — just close on success
+                                    onDismiss()
+                                }
+                            } else {
+                                validation = .invalid("Failed to save the API key. Check the key format and try again.")
+                            }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(provider.isEmpty || apiKey.isEmpty || isBusy)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(provider.isEmpty || apiKey.isEmpty || isSaving)
             }
         }
         .padding(24)
-        .frame(width: 420)
+        .frame(width: 450)
         .onAppear {
             provider = initialProvider
+        }
+        .onChange(of: provider) {
+            if validation != .idle { validation = .idle }
+        }
+        .onChange(of: apiKey) {
+            if validation != .idle { validation = .idle }
         }
     }
 }
@@ -638,8 +723,8 @@ struct DashboardView: View {
     private var gatewayView: some View {
         ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    // Status card
-                    GroupBox("Status") {
+                    // Status
+                    GroupBox {
                         HStack(spacing: 12) {
                             Image(systemName: service.gatewayStatus?.running == true ? "checkmark.circle.fill" : "xmark.circle.fill")
                                 .font(.largeTitle)
@@ -667,10 +752,12 @@ struct DashboardView: View {
 
                             Spacer()
                         }
+                    } label: {
+                        SectionHeader("Status")
                     }
 
-                    // Control buttons
-                    GroupBox("Controls") {
+                    // Controls
+                    GroupBox {
                         VStack(alignment: .leading, spacing: 12) {
                             HStack(spacing: 12) {
                                 if service.gatewayStatus?.running == true {
@@ -732,6 +819,8 @@ struct DashboardView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         }
+                    } label: {
+                        SectionHeader("Controls", description: "Manage the gateway service")
                     }
 
                     // Operation log
@@ -745,13 +834,12 @@ struct DashboardView: View {
                             }
                             .frame(maxHeight: 300)
                         } label: {
-                            HStack {
-                                Text("Operation Log")
-                                Spacer()
+                            HStack(spacing: 6) {
+                                SectionHeader("Operation Log")
                                 if gatewayIsActing {
                                     ProgressView()
                                         .controlSize(.small)
-                                    Text("Running...")
+                                    Text("Running…")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -773,8 +861,8 @@ struct DashboardView: View {
                         GroupBox {
                             HStack {
                                 Image(systemName: "globe")
-                                Text("Dashboard: http://127.0.0.1:\(port)/")
-                                    .font(.callout)
+                                Text("http://127.0.0.1:\(port)/")
+                                    .font(.callout.monospaced())
                                 Spacer()
                                 Button("Open in Browser") {
                                     if let url = URL(string: "http://127.0.0.1:\(port)/") {
@@ -783,6 +871,8 @@ struct DashboardView: View {
                                 }
                                 .buttonStyle(.bordered)
                             }
+                        } label: {
+                            SectionHeader("Dashboard", description: "Web-based gateway interface")
                         }
                     }
 
@@ -840,17 +930,11 @@ struct DashboardView: View {
                             }
                         }
                     } label: {
-                        HStack {
-                            Text("Configuration")
-                            Spacer()
-                            Text("Read and write config values using dot-path notation")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                        SectionHeader("Configuration", description: "Read and write config values using dot-path notation")
                     }
 
                     // Diagnostics
-                    GroupBox("Diagnostics") {
+                    GroupBox {
                         VStack(alignment: .leading, spacing: 10) {
                             HStack(spacing: 12) {
                                 Button {
@@ -903,6 +987,8 @@ struct DashboardView: View {
                                 .frame(maxHeight: 300)
                             }
                         }
+                    } label: {
+                        SectionHeader("Diagnostics", description: "Health checks and troubleshooting")
                     }
 
                     ToastBanner(toast: configToast)
@@ -946,6 +1032,8 @@ struct DashboardView: View {
     @State private var fallbackModels: [String] = []
     @State private var fallbacksLoaded = false
     @State private var isSavingFallbackOrder = false
+    @State private var validatingProvider = ""
+    @State private var providerValidationResults: [String: Bool] = [:]  // provider -> isValid
 
     private var hasDefaultModel: Bool {
         guard let m = service.modelsStatus?.defaultModel, !m.isEmpty else { return false }
@@ -955,22 +1043,16 @@ struct DashboardView: View {
     private var modelsView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                // Default Model — hero card
+                // Default Model
                 GroupBox {
                     if hasDefaultModel {
-                        // Current default model display
                         HStack(spacing: 12) {
                             Image(systemName: "cpu")
                                 .font(.title2)
                                 .foregroundStyle(.accent)
 
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Default Model")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Text(service.modelsStatus?.defaultModel ?? "")
-                                    .font(.headline.monospaced())
-                            }
+                            Text(service.modelsStatus?.defaultModel ?? "")
+                                .font(.headline.monospaced())
 
                             Spacer()
 
@@ -1020,6 +1102,8 @@ struct DashboardView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
                     }
+                } label: {
+                    SectionHeader("Default Model")
                 }
 
                 // Fallback Models
@@ -1138,23 +1222,16 @@ struct DashboardView: View {
                         .padding(.top, 6)
                     }
                 } label: {
-                    HStack {
-                        Text("Fallback Models")
-                        if !fallbackModels.isEmpty {
-                            Text("·")
-                                .foregroundStyle(.secondary)
-                            Text("\(fallbackModels.count)")
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
+                    HStack(spacing: 6) {
+                        SectionHeader(
+                            "Fallback Models",
+                            count: fallbackModels.isEmpty ? nil : fallbackModels.count,
+                            description: isSavingFallbackOrder ? nil : "Tried in order when the primary model fails"
+                        )
                         if isSavingFallbackOrder {
                             ProgressView()
                                 .controlSize(.small)
                             Text("Saving…")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text("Tried in order when the primary model fails")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -1162,7 +1239,7 @@ struct DashboardView: View {
                 }
 
                 // Providers
-                GroupBox("Providers") {
+                GroupBox {
                     if let providers = service.modelsStatus?.providers, !providers.isEmpty {
                         VStack(spacing: 0) {
                             ForEach(Array(providers.enumerated()), id: \.element.id) { index, provider in
@@ -1172,26 +1249,49 @@ struct DashboardView: View {
                                 }
                             }
                         }
-                    } else {
-                        HStack {
-                            Image(systemName: "network.slash")
-                                .foregroundStyle(.secondary)
-                            Text("No providers found. Refresh to discover available providers.")
-                                .foregroundStyle(.secondary)
-                                .font(.callout)
-                        }
-                        .padding(.vertical, 4)
-                    }
-                }
 
-                // Add API Key button (for providers not in the list)
-                Button {
-                    configProviderName = ""
-                    showConfigureAPISheet = true
+                        HStack {
+                            Spacer()
+                            Button {
+                                configProviderName = ""
+                                showConfigureAPISheet = true
+                            } label: {
+                                Label("Add API Key", systemImage: "key")
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                        .padding(.top, 6)
+                    } else {
+                        VStack(spacing: 10) {
+                            Image(systemName: "network.slash")
+                                .font(.title2)
+                                .foregroundStyle(.secondary)
+                            Text("No providers configured")
+                                .font(.headline)
+                            Text("Add an API key to connect to a model provider like OpenAI, Anthropic, or Google.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                            Button {
+                                configProviderName = ""
+                                showConfigureAPISheet = true
+                            } label: {
+                                Label("Add API Key", systemImage: "key")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.regular)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                    }
                 } label: {
-                    Label("Add API Key", systemImage: "key")
+                    SectionHeader(
+                        "Providers",
+                        count: service.modelsStatus?.providers.isEmpty == false ? service.modelsStatus?.providers.count : nil,
+                        description: "API keys and provider authentication"
+                    )
                 }
-                .buttonStyle(.bordered)
 
                 ToastBanner(toast: modelsToast)
             }
@@ -1239,6 +1339,9 @@ struct DashboardView: View {
                         modelsToast.show(result.output, isError: true)
                     }
                     return result.exitCode == 0
+                },
+                onValidate: { provider in
+                    await service.validateProviderAuth(provider: provider)
                 },
                 onDismiss: { showConfigureAPISheet = false }
             )
@@ -1307,29 +1410,69 @@ struct DashboardView: View {
 
     private func providerRow(_ provider: ProviderStatus) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: provider.authenticated ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundStyle(provider.authenticated ? Color.green : Color.red)
-                .font(.title3)
+            // Status icon — shows validation result if available, otherwise auth status
+            if validatingProvider == provider.name {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 20, height: 20)
+            } else if let isValid = providerValidationResults[provider.name] {
+                Image(systemName: isValid ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(isValid ? Color.green : Color.orange)
+                    .font(.title3)
+            } else {
+                Image(systemName: provider.authenticated ? "checkmark.circle.fill" : "xmark.circle.fill")
+                    .foregroundStyle(provider.authenticated ? Color.green : Color.red)
+                    .font(.title3)
+            }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(provider.name.capitalized)
                     .font(.body.weight(.medium))
-                Text(provider.authenticated ? "Authenticated" : "No API key configured")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+
+                if validatingProvider == provider.name {
+                    Text("Validating…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if let isValid = providerValidationResults[provider.name] {
+                    Text(isValid ? "Key validated successfully" : "Validation failed — key may be invalid")
+                        .font(.caption)
+                        .foregroundStyle(isValid ? .green : .orange)
+                } else {
+                    Text(provider.authenticated ? "Authenticated" : "No API key configured")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()
 
-            if !provider.authenticated {
+            if provider.authenticated {
+                Button("Validate") {
+                    Task {
+                        validatingProvider = provider.name
+                        providerValidationResults.removeValue(forKey: provider.name)
+                        let status = await service.validateProviderAuth(provider: provider.name)
+                        providerValidationResults[provider.name] = status?.authenticated == true
+                        validatingProvider = ""
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!validatingProvider.isEmpty)
+
+                Button("Change Key") {
+                    configProviderName = provider.name
+                    showConfigureAPISheet = true
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            } else {
                 Button("Add Key") {
                     configProviderName = provider.name
                     showConfigureAPISheet = true
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-            } else {
-                StatusBadge(label: "Connected", color: Color.green)
             }
         }
         .padding(.vertical, 4)

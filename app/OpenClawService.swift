@@ -18,6 +18,11 @@ class OpenClawService {
     /// Optional gateway reference for WebSocket-first operations
     var gateway: GatewayWebSocket?
 
+    /// Open a command in Terminal.app for interactive flows
+    nonisolated func openInTerminal(_ command: String) {
+        shell.openInTerminal(command)
+    }
+
     // MARK: - Agents
 
     /// Fetch all agents — tries gateway RPC first, falls back to CLI
@@ -64,6 +69,25 @@ class OpenClawService {
             }
         }
         return []
+    }
+
+    /// Add a channel binding to an agent
+    func bindAgent(name: String, channel: String) async -> CommandResult {
+        let result = await shell.run("openclaw agents bind --agent \(name) --bind \(channel)")
+        if result.exitCode == 0 { await fetchAgents() }
+        return result
+    }
+
+    /// Remove a channel binding from an agent
+    func unbindAgent(name: String, channel: String) async -> CommandResult {
+        let result = await shell.run("openclaw agents unbind --agent \(name) --bind \(channel)")
+        if result.exitCode == 0 { await fetchAgents() }
+        return result
+    }
+
+    /// Fetch usage stats for a specific agent via status --usage
+    func fetchAgentUsage(agent: String) async -> CommandResult {
+        return await shell.run("openclaw status --usage --json", recordHistory: false)
     }
 
     /// Add a new agent
@@ -323,6 +347,29 @@ class OpenClawService {
         return result
     }
 
+    /// Validate a specific provider's API key by checking its auth status.
+    /// Returns the ProviderStatus for the given provider, or nil if not found.
+    func validateProviderAuth(provider: String) async -> ProviderStatus? {
+        let result = await shell.run("openclaw models status --check --json", recordHistory: false)
+        guard let data = result.output.data(using: .utf8),
+              let status = try? JSONDecoder().decode(ModelsStatus.self, from: data) else {
+            return nil
+        }
+        // Update cached status
+        modelsStatus = status
+        return status.providers.first { $0.provider == provider }
+    }
+
+    /// Validate a provider's key for a specific agent.
+    func validateAgentProviderAuth(agent: String, provider: String) async -> ProviderStatus? {
+        let result = await shell.run("openclaw models --agent \(agent) status --check --json", recordHistory: false)
+        guard let data = result.output.data(using: .utf8),
+              let status = try? JSONDecoder().decode(ModelsStatus.self, from: data) else {
+            return nil
+        }
+        return status.providers.first { $0.provider == provider }
+    }
+
     // MARK: - Sessions
 
     /// Fetch sessions — tries gateway RPC first, falls back to CLI
@@ -511,14 +558,43 @@ class OpenClawService {
         return await shell.run("openclaw channels status --json")
     }
 
-    /// Login to a channel
-    func channelLogin(channel: String) async -> CommandResult {
-        return await shell.run("openclaw channels login --channel \(channel)")
+    /// Start a streaming channel login process (e.g. WhatsApp QR flow)
+    func channelLoginStreaming(channel: String, account: String? = nil) -> StreamingProcess {
+        var cmd = "openclaw channels login --channel \(channel)"
+        if let account { cmd += " --account \(account)" }
+        return shell.startStreaming(cmd)
     }
 
-    /// Logout from a channel
-    func channelLogout(channel: String) async -> CommandResult {
-        return await shell.run("openclaw channels logout --channel \(channel)")
+    /// List pairing requests for a channel
+    func pairingList(channel: String) async -> CommandResult {
+        return await shell.run("openclaw pairing list \(channel) --json", recordHistory: false)
+    }
+
+    /// Approve a pairing request
+    func pairingApprove(channel: String, code: String) async -> CommandResult {
+        return await shell.run("openclaw pairing approve \(channel) \(code)")
+    }
+
+    /// Enable a config-based channel
+    func enableChannel(channel: String) async -> CommandResult {
+        return await shell.run("openclaw config set channels.\(channel).enabled true --json")
+    }
+
+    /// Disable a config-based channel
+    func disableChannel(channel: String) async -> CommandResult {
+        return await shell.run("openclaw config set channels.\(channel).enabled false --json")
+    }
+
+    /// Set a config value as a JSON-typed value (for booleans, numbers, objects)
+    func configSetJSON(_ key: String, value: String) async -> CommandResult {
+        return await shell.run("openclaw config set \(key) '\(value)' --json")
+    }
+
+    /// Set a config value as a quoted string
+    func configSetString(_ key: String, value: String) async -> CommandResult {
+        // --json with quoted string ensures it's stored as a string
+        let escaped = value.replacingOccurrences(of: "\"", with: "\\\"")
+        return await shell.run("openclaw config set \(key) '\"\(escaped)\"' --json")
     }
 
     // MARK: - Logs

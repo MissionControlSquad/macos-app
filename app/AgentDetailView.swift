@@ -59,10 +59,26 @@ struct AgentDetailView: View {
     @State private var agentModel = ""
     @State private var showModelChooser = false
     @State private var showAPIKeySheet = false
+    @State private var apiKeyOverrideProvider = ""
+    @State private var agentAuthOverrides: Set<String> = []
+    @State private var validatingProvider = ""
+    @State private var providerValidationResults: [String: Bool] = [:]
 
     // Identity editing
     @State private var editDisplayName = ""
     @State private var editEmoji = ""
+
+    // Channel bindings
+    @State private var agentBindings: [String] = []
+    @State private var isLoadingBindings = true
+    @State private var showAddBindingPopover = false
+    @State private var newBindingChannel = ""
+    @State private var newBindingAccountId = ""
+    @State private var isBindingBusy = false
+
+    // Usage stats
+    @State private var usageOutput = ""
+    @State private var isLoadingUsage = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -835,12 +851,188 @@ struct AgentDetailView: View {
                 LabeledContent("Bindings", value: "\(agent.bindingsCount ?? 0)")
             }
 
-            if let routes = agent.routes, !routes.isEmpty {
-                Section("Channel Routes") {
-                    ForEach(routes, id: \.self) { route in
-                        Label(route, systemImage: "arrow.triangle.branch")
+            Section {
+                if isLoadingUsage {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading usage data…")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if sessions.isEmpty && usageOutput.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "chart.bar")
+                            .foregroundStyle(.secondary)
+                        Text("No usage data available. Start a session to begin tracking.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    // Aggregated session token stats
+                    let totalInput = sessions.compactMap(\.inputTokens).reduce(0, +)
+                    let totalOutput = sessions.compactMap(\.outputTokens).reduce(0, +)
+                    let totalTokens = sessions.compactMap(\.totalTokens).reduce(0, +)
+                    let sessionCount = sessions.count
+
+                    HStack(spacing: 0) {
+                        usageStatCard(
+                            title: "Sessions",
+                            value: "\(sessionCount)",
+                            icon: "bubble.left.and.bubble.right",
+                            color: .blue
+                        )
+                        Divider().frame(height: 40)
+                        usageStatCard(
+                            title: "Input Tokens",
+                            value: formatTokenCount(totalInput),
+                            icon: "arrow.up.circle",
+                            color: .green
+                        )
+                        Divider().frame(height: 40)
+                        usageStatCard(
+                            title: "Output Tokens",
+                            value: formatTokenCount(totalOutput),
+                            icon: "arrow.down.circle",
+                            color: .orange
+                        )
+                        Divider().frame(height: 40)
+                        usageStatCard(
+                            title: "Total Tokens",
+                            value: formatTokenCount(totalTokens),
+                            icon: "number.circle",
+                            color: .purple
+                        )
+                    }
+
+                    // Model breakdown
+                    let modelGroups = Dictionary(grouping: sessions.filter { $0.model != nil }, by: { $0.model! })
+                    if !modelGroups.isEmpty {
+                        ForEach(modelGroups.keys.sorted(), id: \.self) { model in
+                            let modelSessions = modelGroups[model]!
+                            let modelTokens = modelSessions.compactMap(\.totalTokens).reduce(0, +)
+                            HStack(spacing: 10) {
+                                Image(systemName: "cpu")
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 20)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(model)
+                                        .font(.system(.callout, design: .monospaced))
+                                    Text("\(modelSessions.count) session\(modelSessions.count == 1 ? "" : "s")")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(formatTokenCount(modelTokens) + " tokens")
+                                    .font(.callout.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+
+                    // Provider usage (from CLI)
+                    if !usageOutput.isEmpty {
+                        DisclosureGroup("Provider Usage Details") {
+                            Text(usageOutput)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                 }
+
+                HStack {
+                    Spacer()
+                    Button {
+                        Task { await refreshUsage() }
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(isLoadingUsage)
+                }
+            } header: {
+                Text("Usage & Tokens")
+            } footer: {
+                Text("Token usage aggregated across all sessions for this agent. Provider usage requires valid API credentials.")
+            }
+
+            Section {
+                if isLoadingBindings {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading bindings…")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if agentBindings.isEmpty {
+                    VStack(spacing: 8) {
+                        Text("No channel bindings")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Text("Bind this agent to a channel so it can receive and respond to messages.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
+                } else {
+                    ForEach(agentBindings, id: \.self) { binding in
+                        HStack(spacing: 10) {
+                            Image(systemName: channelIcon(for: binding))
+                                .foregroundStyle(.accent)
+                                .frame(width: 20)
+                            Text(binding)
+                                .font(.system(.body, design: .monospaced))
+                            Spacer()
+                            Button {
+                                Task {
+                                    isBindingBusy = true
+                                    let r = await service.unbindAgent(name: agent.name, channel: binding)
+                                    isBindingBusy = false
+                                    if r.exitCode == 0 {
+                                        agentBindings.removeAll { $0 == binding }
+                                        toast.show("Removed \(binding) binding")
+                                    } else {
+                                        toast.show(r.output, isError: true)
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "minus.circle.fill")
+                                    .foregroundStyle(.red)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isBindingBusy)
+                            .help("Remove binding")
+                        }
+                    }
+                }
+
+                HStack {
+                    Spacer()
+                    Button {
+                        showAddBindingPopover = true
+                    } label: {
+                        Label("Add Binding", systemImage: "plus")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(isBindingBusy)
+                    .popover(isPresented: $showAddBindingPopover, arrowEdge: .bottom) {
+                        addBindingPopover
+                    }
+                }
+            } header: {
+                HStack {
+                    Text("Channel Bindings")
+                    if !agentBindings.isEmpty {
+                        Text("· \(agentBindings.count)")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } footer: {
+                Text("Channel bindings route messages from a channel (e.g. whatsapp, telegram, discord) to this agent.")
             }
 
             Section {
@@ -900,6 +1092,153 @@ struct AgentDetailView: View {
             editDisplayName = agent.displayName ?? ""
             editEmoji = agent.emoji ?? ""
         }
+        .task {
+            agentBindings = await service.fetchBindings(for: agent.name)
+            isLoadingBindings = false
+            await refreshUsage()
+        }
+    }
+
+    private static let supportedChannels = [
+        "whatsapp", "telegram", "discord", "slack",
+        "signal", "imessage", "msteams", "mattermost", "google-chat"
+    ]
+
+    private var addBindingPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Add Channel Binding")
+                .font(.headline)
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("Channel", selection: $newBindingChannel) {
+                    Text("Select channel…").tag("")
+                    ForEach(Self.supportedChannels, id: \.self) { channel in
+                        Label(channel.capitalized, systemImage: channelIcon(for: channel))
+                            .tag(channel)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                LabeledContent("Account ID") {
+                    TextField("Optional", text: $newBindingAccountId)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 150)
+                }
+
+                Text("Leave empty for the default account. Use an account ID when you have multiple accounts on the same channel (e.g. telegram:alerts-bot).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Preview
+            if !newBindingChannel.isEmpty {
+                let bindingSpec = newBindingAccountId.isEmpty ? newBindingChannel : "\(newBindingChannel):\(newBindingAccountId)"
+                HStack(spacing: 6) {
+                    Image(systemName: channelIcon(for: newBindingChannel))
+                        .foregroundStyle(.accent)
+                    Text(bindingSpec)
+                        .font(.system(.callout, design: .monospaced))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.accentColor.opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+
+            Text("The channel must be configured (token/credentials set) before binding. Set up channels in the Channels page or via config file.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Button("Cancel") {
+                    showAddBindingPopover = false
+                    newBindingChannel = ""
+                    newBindingAccountId = ""
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Spacer()
+
+                Button("Add Binding") {
+                    guard !newBindingChannel.isEmpty else { return }
+                    let bindingSpec = newBindingAccountId.isEmpty ? newBindingChannel : "\(newBindingChannel):\(newBindingAccountId)"
+                    Task {
+                        isBindingBusy = true
+                        showAddBindingPopover = false
+                        let r = await service.bindAgent(name: agent.name, channel: bindingSpec)
+                        isBindingBusy = false
+                        if r.exitCode == 0 {
+                            agentBindings.append(bindingSpec)
+                            toast.show("Bound \(bindingSpec) to \(agent.displayName ?? agent.name)")
+                        } else {
+                            toast.show(r.output, isError: true)
+                        }
+                        newBindingChannel = ""
+                        newBindingAccountId = ""
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(newBindingChannel.isEmpty)
+            }
+        }
+        .padding(16)
+        .frame(width: 300)
+    }
+
+    private func channelIcon(for channel: String) -> String {
+        let name = channel.lowercased().components(separatedBy: ":").first ?? channel
+        switch name {
+        case "whatsapp": return "message.fill"
+        case "telegram": return "paperplane.fill"
+        case "discord": return "gamecontroller.fill"
+        case "slack": return "number"
+        case "signal": return "lock.shield.fill"
+        case "imessage": return "bubble.fill"
+        case "msteams": return "person.3.fill"
+        case "mattermost": return "bubble.left.and.bubble.right.fill"
+        case "google-chat": return "ellipsis.bubble.fill"
+        default: return "antenna.radiowaves.left.and.right"
+        }
+    }
+
+    private func usageStatCard(title: String, value: String, icon: String, color: Color) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundStyle(color)
+            Text(value)
+                .font(.title3.monospacedDigit().bold())
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 6)
+    }
+
+    private func refreshUsage() async {
+        isLoadingUsage = true
+        // Refresh sessions to get latest token data
+        await refreshSessions()
+        // Fetch provider usage via CLI
+        let r = await service.fetchAgentUsage(agent: agent.name)
+        if r.exitCode == 0, !r.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Try to extract human-readable usage info
+            // If JSON, show raw; if text, show as-is
+            let output = r.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if output.hasPrefix("{") || output.hasPrefix("[") {
+                // Parse JSON for a cleaner display — show raw for now
+                usageOutput = output
+            } else {
+                usageOutput = output
+            }
+        }
+        isLoadingUsage = false
     }
 
     // MARK: - Model View
@@ -942,17 +1281,110 @@ struct AgentDetailView: View {
             }
 
             Section {
-                HStack {
-                    Spacer()
-                    Button("Configure API Key") {
-                        showAPIKeySheet = true
+                if let providers = service.modelsStatus?.providers, !providers.isEmpty {
+                    ForEach(providers) { provider in
+                        HStack(spacing: 10) {
+                            // Status icon — validation result, validating spinner, or auth status
+                            if validatingProvider == provider.name {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .frame(width: 20, height: 20)
+                            } else if let isValid = providerValidationResults[provider.name] {
+                                Image(systemName: isValid ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                                    .foregroundStyle(isValid ? Color.green : Color.orange)
+                                    .font(.title3)
+                            } else {
+                                Image(systemName: provider.authenticated ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                    .foregroundStyle(provider.authenticated ? Color.green : Color.red)
+                                    .font(.title3)
+                            }
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(provider.name.capitalized)
+                                    .font(.body.weight(.medium))
+
+                                if validatingProvider == provider.name {
+                                    Text("Validating…")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                } else if let isValid = providerValidationResults[provider.name] {
+                                    if agentAuthOverrides.contains(provider.name) {
+                                        Text(isValid ? "Agent key validated" : "Agent key validation failed")
+                                            .font(.caption)
+                                            .foregroundStyle(isValid ? .green : .orange)
+                                    } else {
+                                        Text(isValid ? "Global key validated" : "Global key validation failed")
+                                            .font(.caption)
+                                            .foregroundStyle(isValid ? .green : .orange)
+                                    }
+                                } else if agentAuthOverrides.contains(provider.name) {
+                                    Text("Using agent-specific key")
+                                        .font(.caption)
+                                        .foregroundStyle(.orange)
+                                } else if provider.authenticated {
+                                    Text("Using global key")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    Text("No API key configured")
+                                        .font(.caption)
+                                        .foregroundStyle(.red)
+                                }
+                            }
+
+                            Spacer()
+
+                            if provider.authenticated || agentAuthOverrides.contains(provider.name) {
+                                Button("Validate") {
+                                    Task {
+                                        validatingProvider = provider.name
+                                        providerValidationResults.removeValue(forKey: provider.name)
+                                        if agentAuthOverrides.contains(provider.name) {
+                                            let status = await service.validateAgentProviderAuth(agent: agent.name, provider: provider.name)
+                                            providerValidationResults[provider.name] = status?.authenticated == true
+                                        } else {
+                                            let status = await service.validateProviderAuth(provider: provider.name)
+                                            providerValidationResults[provider.name] = status?.authenticated == true
+                                        }
+                                        validatingProvider = ""
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(!validatingProvider.isEmpty)
+                            }
+
+                            if agentAuthOverrides.contains(provider.name) {
+                                Button("Remove Override") {
+                                    agentAuthOverrides.remove(provider.name)
+                                    providerValidationResults.removeValue(forKey: provider.name)
+                                    toast.show("Reverted \(provider.name.capitalized) to global key")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+
+                            Button(agentAuthOverrides.contains(provider.name) ? "Change" : "Override") {
+                                apiKeyOverrideProvider = provider.name
+                                showAPIKeySheet = true
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
                     }
-                    .buttonStyle(.bordered)
+                } else {
+                    HStack(spacing: 8) {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(.secondary)
+                        Text("No providers configured. Add API keys on the Models page first.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             } header: {
-                Text("Agent API Key")
+                Text("Provider API Keys")
             } footer: {
-                Text("Configure a provider API key specifically for this agent, overriding the global key.")
+                Text("This agent inherits API keys from global settings. You can override a specific provider's key for this agent only.")
             }
         }
         .formStyle(.grouped)
@@ -975,17 +1407,29 @@ struct AgentDetailView: View {
         .sheet(isPresented: $showAPIKeySheet) {
             APIKeySheet(
                 title: "API Key for \(agent.displayName ?? agent.name)",
-                description: "Configure a provider API key specifically for this agent, overriding the global key.",
+                description: "This key will override the global \(apiKeyOverrideProvider.isEmpty ? "provider" : apiKeyOverrideProvider.capitalized) key for this agent only.",
+                initialProvider: apiKeyOverrideProvider,
                 onSave: { provider, apiKey in
                     let r = await service.configureAgentAuth(
                         agent: agent.name,
                         provider: provider,
                         apiKey: apiKey
                     )
-                    toast.show(r.exitCode == 0 ? "\(provider) key saved" : r.output, isError: r.exitCode != 0)
+                    if r.exitCode == 0 {
+                        agentAuthOverrides.insert(provider)
+                        toast.show("\(provider.capitalized) key set for \(agent.displayName ?? agent.name)")
+                    } else {
+                        toast.show(r.output, isError: true)
+                    }
                     return r.exitCode == 0
                 },
-                onDismiss: { showAPIKeySheet = false }
+                onValidate: { provider in
+                    await service.validateAgentProviderAuth(agent: agent.name, provider: provider)
+                },
+                onDismiss: {
+                    showAPIKeySheet = false
+                    apiKeyOverrideProvider = ""
+                }
             )
         }
     }

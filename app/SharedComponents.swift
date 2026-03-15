@@ -198,6 +198,48 @@ extension View {
 
 
 
+// MARK: - Section Header
+
+/// Consistent GroupBox label used across all dashboard pages.
+///
+/// Usage:
+/// ```swift
+/// GroupBox {
+///     // content
+/// } label: {
+///     SectionHeader("Fallback Models", count: 3, description: "Tried in order")
+/// }
+/// ```
+struct SectionHeader: View {
+    let title: String
+    var count: Int? = nil
+    var description: String? = nil
+
+    init(_ title: String, count: Int? = nil, description: String? = nil) {
+        self.title = title
+        self.count = count
+        self.description = description
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(title)
+            if let count {
+                Text("·")
+                    .foregroundStyle(.secondary)
+                Text("\(count)")
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if let description {
+                Text(description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
 // MARK: - Connection Indicator
 
 /// Small colored dot + label showing gateway/offline status.
