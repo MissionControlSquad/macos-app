@@ -379,6 +379,10 @@ struct DashboardView: View {
             detailView
         }
         .toastOverlay(toast)
+        .onChange(of: selection) {
+            // Clear stale session ID when switching away from an agent
+            openSessionId = nil
+        }
         .task {
             // Wire gateway into service and model catalog for WebSocket-first operations
             service.gateway = gateway
@@ -558,6 +562,7 @@ struct DashboardView: View {
             AgentDetailView(agent: agent, service: service, initialSessionId: openSessionId, onDeleted: {
                 selection = SidebarItem.agents.rawValue
             })
+            .id(agent.id)
         } else {
             switch selection {
             case SidebarItem.sessions.rawValue:

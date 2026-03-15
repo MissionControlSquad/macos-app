@@ -16,10 +16,12 @@ struct Agent: Identifiable, Codable, Hashable {
     /// Agent display name from gateway
     private let _name: String?
 
-    // Fields not from JSON, populated separately
-    var status: String?
-    var emoji: String?
+    /// Identity fields from CLI JSON (`identityName`, `identityEmoji`)
     var displayName: String?
+    var emoji: String?
+
+    /// Agent status (set via gateway or other sources)
+    var status: String?
 
     var agentStatus: AgentStatus {
         guard let status else { return .unknown }
@@ -37,6 +39,8 @@ struct Agent: Identifiable, Codable, Hashable {
         case isDefault
         case routes
         case _name = "name"
+        case displayName = "identityName"
+        case emoji = "identityEmoji"
     }
 }
 
@@ -164,8 +168,9 @@ struct ProviderStatus: Identifiable, Codable {
     let profiles: [AuthProfile]?
 
     /// Whether this provider has valid auth configured
+    /// API keys return "static", OAuth tokens return "ok", CLI check returns "valid"
     var authenticated: Bool {
-        status == "ok" || status == "valid"
+        status == "ok" || status == "valid" || status == "static"
     }
 
     var name: String { provider }

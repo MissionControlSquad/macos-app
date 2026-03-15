@@ -337,101 +337,139 @@ class OpenClawService {
         return result
     }
 
-    /// Configure a provider API key via `openclaw onboard` (non-interactive)
+    /// Configure a provider API key.
+    ///
+    /// Writes directly to both storage locations:
+    /// 1. `auth-profiles.json` — the actual secret key
+    /// 2. `openclaw.json` — the profile reference (via `openclaw config set`)
+    ///
+    /// The CLI's `openclaw onboard --auth-choice <provider>-api-key` has a bug where it
+    /// doesn't write to `auth-profiles.json` in non-interactive mode, so we bypass it
+    /// and write the files directly for API key providers.
     func configureProvider(provider: String, apiKey: String) async -> CommandResult {
-        let escaped = apiKey.replacingOccurrences(of: "\"", with: "\\\"")
+        let providerKey = provider.lowercased()
 
-        // Map provider display names → onboard CLI --auth-choice and --flag values.
-        // Derived from `openclaw onboard --help`.
-        let authChoice: String
-        let flagName: String
-        switch provider.lowercased() {
-        case "google":
-            authChoice = "gemini-api-key"
-            flagName = "gemini-api-key"
-        case "openai":
-            authChoice = "openai-api-key"
-            flagName = "openai-api-key"
-        case "anthropic":
-            authChoice = "anthropic-api-key"
-            flagName = "anthropic-api-key"
-        case "mistral":
-            authChoice = "mistral-api-key"
-            flagName = "mistral-api-key"
-        case "openrouter":
-            authChoice = "openrouter-api-key"
-            flagName = "openrouter-api-key"
-        case "xai":
-            authChoice = "xai-api-key"
-            flagName = "xai-api-key"
-        case "together":
-            authChoice = "together-api-key"
-            flagName = "together-api-key"
-        case "huggingface":
-            authChoice = "huggingface-api-key"
-            flagName = "huggingface-api-key"
-        case "kimi-coding":
-            authChoice = "kimi-code-api-key"
-            flagName = "kimi-code-api-key"
-        case "zai":
-            authChoice = "zai-api-key"
-            flagName = "zai-api-key"
-        case "minimax":
-            authChoice = "minimax-global-api"
-            flagName = "minimax-api-key"
-        case "minimax-cn":
-            authChoice = "minimax-cn-api"
-            flagName = "minimax-api-key"
-        case "opencode":
-            authChoice = "opencode-zen"
-            flagName = "opencode-zen-api-key"
-        case "opencode-go":
-            authChoice = "opencode-go"
-            flagName = "opencode-go-api-key"
-        case "volcengine":
-            authChoice = "volcengine-api-key"
-            flagName = "volcengine-api-key"
-        case "moonshot":
-            authChoice = "moonshot-api-key"
-            flagName = "moonshot-api-key"
-        case "litellm":
-            authChoice = "litellm-api-key"
-            flagName = "litellm-api-key"
-        case "venice":
-            authChoice = "venice-api-key"
-            flagName = "venice-api-key"
-        case "xiaomi":
-            authChoice = "xiaomi-api-key"
-            flagName = "xiaomi-api-key"
-        case "byteplus":
-            authChoice = "byteplus-api-key"
-            flagName = "byteplus-api-key"
+        // Special cases: local runners (no key) and OAuth providers
+        switch providerKey {
         case "ollama":
-            // Ollama has no API key — just register it
-            let cmd = "openclaw onboard --non-interactive --accept-risk --auth-choice ollama"
-            let result = await shell.run(cmd)
-            await fetchModelsStatus()
-            return result
+            let cmd = "openclaw onboard --non-interactive --accept-risk --auth-choice ollama --skip-health"
+            return await runOnboardAndRestart(cmd)
+        case "vllm":
+            let cmd = "openclaw onboard --non-interactive --accept-risk --auth-choice vllm --skip-health"
+            return await runOnboardAndRestart(cmd)
+        case "sglang":
+            let cmd = "openclaw onboard --non-interactive --accept-risk --auth-choice sglang --skip-health"
+            return await runOnboardAndRestart(cmd)
+        case "openai-codex":
+            shell.openInTerminal("openclaw onboard --auth-choice openai-codex")
+            return CommandResult(command: "openai-codex OAuth", output: "Opened Terminal for OAuth login", timestamp: Date(), exitCode: 0)
         default:
-            authChoice = "\(provider)-api-key"
-            flagName = "\(provider)-api-key"
+            break
         }
 
-        let cmd = "openclaw onboard --non-interactive --accept-risk --auth-choice \(authChoice) --\(flagName) \"\(escaped)\""
+        // Resolve the provider name used in auth-profiles.json.
+        // Most providers use their name directly, but some map differently.
+        let profileProvider: String
+        switch providerKey {
+        case "google": profileProvider = "google"
+        case "kimi-coding": profileProvider = "kimi-coding"
+        case "vercel-ai-gateway": profileProvider = "vercel-ai-gateway"
+        case "cloudflare-ai-gateway": profileProvider = "cloudflare-ai-gateway"
+        case "minimax-cn": profileProvider = "minimax-cn"
+        case "opencode-go": profileProvider = "opencode-go"
+        case "modelstudio-cn": profileProvider = "modelstudio-cn"
+        case "zai-coding-global": profileProvider = "zai-coding-global"
+        case "zai-coding-cn": profileProvider = "zai-coding-cn"
+        case "zai-global": profileProvider = "zai-global"
+        case "zai-cn": profileProvider = "zai-cn"
+        default: profileProvider = providerKey
+        }
+
+        let profileId = "\(profileProvider):default"
+
+        // 1. Write the actual key to auth-profiles.json
+        let writeSuccess = writeToAuthProfilesJSON(profileId: profileId, provider: profileProvider, key: apiKey)
+        guard writeSuccess else {
+            return CommandResult(command: "configureProvider", output: "Failed to write to auth-profiles.json", timestamp: Date(), exitCode: 1)
+        }
+
+        // 2. Write the profile reference to openclaw.json via CLI
+        _ = await shell.run("openclaw config set 'auth.profiles.\(profileId)' '{\"provider\":\"\(profileProvider)\",\"mode\":\"api_key\"}'")
+
+
+        // 3. Restart gateway and refresh
+        _ = await shell.run("openclaw gateway restart", recordHistory: false)
+        try? await Task.sleep(for: .seconds(2))
+        await fetchModelsStatus()
+
+        return CommandResult(command: "configureProvider", output: "\(provider) configured", timestamp: Date(), exitCode: 0)
+    }
+
+    /// Write an API key entry to auth-profiles.json.
+    /// Returns true on success.
+    private func writeToAuthProfilesJSON(profileId: String, provider: String, key: String) -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let profilesPath = "\(home)/.openclaw/agents/main/agent/auth-profiles.json"
+
+        // Read existing file or create default structure
+        var json: [String: Any]
+        if let data = FileManager.default.contents(atPath: profilesPath),
+           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            json = existing
+        } else {
+            json = ["version": 1, "profiles": [String: Any](), "usageStats": [String: Any]()]
+        }
+
+        // Get or create the profiles dict
+        var profiles = json["profiles"] as? [String: Any] ?? [:]
+
+        // Add the new profile entry
+        profiles[profileId] = [
+            "type": "api_key",
+            "provider": provider,
+            "key": key
+        ]
+        json["profiles"] = profiles
+
+        // Write back
+        guard let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) else {
+            return false
+        }
+
+        do {
+            try updatedData.write(to: URL(fileURLWithPath: profilesPath))
+            return true
+        } catch {
+            print("[Service] Failed to write auth-profiles.json: \(error)")
+            return false
+        }
+    }
+
+    /// Run an onboard command, restart the gateway, and refresh models status.
+    private func runOnboardAndRestart(_ cmd: String) async -> CommandResult {
         let result = await shell.run(cmd)
+        _ = await shell.run("openclaw gateway restart", recordHistory: false)
+        try? await Task.sleep(for: .seconds(2))
         await fetchModelsStatus()
         return result
     }
 
-    /// Remove a provider entirely: auth profiles + allowed models.
+    /// Remove a provider entirely: config references, stored keys, and allowed models.
+    ///
+    /// OpenClaw stores provider auth in two places:
+    /// 1. `~/.openclaw/openclaw.json` → `auth.profiles.<provider>:default` (reference: provider + mode)
+    /// 2. `~/.openclaw/agents/main/agent/auth-profiles.json` → `profiles.<provider>:default` (actual secret key)
+    ///
+    /// There is no CLI command to remove from auth-profiles.json, so we edit it directly.
     func removeProviderAuth(provider: String) async -> CommandResult {
-        // 1. Remove auth profiles (try common patterns)
+        // 1. Remove auth profile references from openclaw.json (try common ID patterns)
         _ = await shell.run("openclaw config unset 'auth.profiles.\(provider):default'")
         _ = await shell.run("openclaw config unset 'auth.profiles.\(provider):manual'")
-        _ = await shell.run("openclaw config unset 'auth.profiles.\(provider)'")
 
-        // 2. Remove this provider's models from the allowed list (agents.defaults.models)
-        //    Get the current models map, find keys starting with "<provider>/"
+        // 2. Remove actual stored keys from auth-profiles.json
+        removeFromAuthProfilesJSON(provider: provider)
+
+        // 3. Remove this provider's models from the allowed list (agents.defaults.models)
         let modelsResult = await shell.run("openclaw config get agents.defaults.models", recordHistory: false)
         if modelsResult.exitCode == 0,
            let data = modelsResult.output.data(using: .utf8),
@@ -443,15 +481,17 @@ class OpenClawService {
             }
         }
 
-        // 3. Locally remove the provider from cached modelsStatus for immediate UI update.
-        //    The gateway caches old config, so fetchModelsStatus() would still show the removed provider.
+        // 4. If this provider was the default model, clear it
+        if let currentDefault = modelsStatus?.defaultModel, currentDefault.hasPrefix(provider + "/") {
+            _ = await shell.run("openclaw config unset 'agents.defaults.model.primary'")
+        }
+
+        // 5. Locally remove the provider from cached modelsStatus for immediate UI update
         if let current = modelsStatus {
             let filteredProviders = current.providers.filter { $0.provider != provider }
             let filteredAllowed = current.allowed?.filter { !$0.hasPrefix(provider + "/") }
-            // Re-encode without the removed provider
             if let authData = try? JSONEncoder().encode(current),
                var json = try? JSONSerialization.jsonObject(with: authData) as? [String: Any] {
-                // Rebuild auth.oauth.providers without the removed provider
                 if var auth = json["auth"] as? [String: Any],
                    var oauth = auth["oauth"] as? [String: Any] {
                     if let providersData = try? JSONEncoder().encode(filteredProviders),
@@ -469,14 +509,39 @@ class OpenClawService {
             }
         }
 
-        // 4. Restart gateway so it picks up the config changes
+        // 6. Restart gateway so it picks up the config changes
         _ = await shell.run("openclaw gateway restart", recordHistory: false)
         try? await Task.sleep(for: .seconds(2))
 
-        // 5. Re-fetch from gateway (should now reflect the removal)
+        // 7. Re-fetch from gateway (should now reflect the removal)
         await fetchModelsStatus()
 
-        return CommandResult(command: "removeProviderAuth", output: "", timestamp: Date(), exitCode: 0)
+        return CommandResult(command: "removeProviderAuth", output: "Removed \(provider)", timestamp: Date(), exitCode: 0)
+    }
+
+    /// Remove a provider's entries from auth-profiles.json directly.
+    /// This file stores actual secret keys — there is no CLI command to remove entries.
+    private func removeFromAuthProfilesJSON(provider: String) {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let profilesPath = "\(home)/.openclaw/agents/main/agent/auth-profiles.json"
+        guard let data = FileManager.default.contents(atPath: profilesPath),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var profiles = json["profiles"] as? [String: Any] else {
+            return
+        }
+
+        // Remove all profile IDs matching this provider (e.g. "anthropic:default", "anthropic:manual")
+        let keysToRemove = profiles.keys.filter { $0.hasPrefix(provider + ":") || $0 == provider }
+        guard !keysToRemove.isEmpty else { return }
+
+        for key in keysToRemove {
+            profiles.removeValue(forKey: key)
+        }
+        json["profiles"] = profiles
+
+        if let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
+            try? updatedData.write(to: URL(fileURLWithPath: profilesPath))
+        }
     }
 
     /// Remove an agent-specific provider auth override

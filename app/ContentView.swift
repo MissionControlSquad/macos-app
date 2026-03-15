@@ -20,7 +20,7 @@ struct ContentView: View {
                 DashboardView()
             }
         }
-        .frame(minWidth: 700, minHeight: 500)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
             await appState.checkAll()
         }

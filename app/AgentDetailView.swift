@@ -1445,6 +1445,9 @@ struct AgentDetailView: View {
         // Give gateway a moment to complete handshake
         try? await Task.sleep(for: .milliseconds(500))
 
+        // Load per-agent model setting
+        agentModel = agent.model ?? ""
+
         workspaceFiles = await service.listWorkspaceFiles(workspace: agent.workspace)
         await refreshSessions()
 

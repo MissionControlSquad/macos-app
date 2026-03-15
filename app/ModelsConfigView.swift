@@ -6,42 +6,166 @@ struct ModelProvider: Identifiable {
     let key: String
     let icon: String
     let description: String
-    let command: String
+    /// Whether this provider requires an API key (false for Ollama, local runners)
+    let requiresKey: Bool
+
+    init(name: String, key: String, icon: String, description: String, requiresKey: Bool = true) {
+        self.name = name
+        self.key = key
+        self.icon = icon
+        self.description = description
+        self.requiresKey = requiresKey
+    }
 }
 
+/// All providers supported by `openclaw onboard`, matching the official docs.
+/// Ordered with the most popular providers first.
 private let providers: [ModelProvider] = [
+    // --- Major cloud providers ---
     ModelProvider(
         name: "Anthropic",
         key: "anthropic",
         icon: "brain.head.profile",
-        description: "Claude models (Sonnet, Opus, Haiku)",
-        command: "openclaw models auth paste-token --provider anthropic"
+        description: "Claude models (Sonnet, Opus, Haiku)"
     ),
     ModelProvider(
         name: "OpenAI",
         key: "openai",
         icon: "sparkles",
-        description: "GPT models",
-        command: "openclaw models auth paste-token --provider openai"
-    ),
-    ModelProvider(
-        name: "Ollama (Local)",
-        key: "ollama",
-        icon: "desktopcomputer",
-        description: "Run models locally with Ollama",
-        command: "openclaw models auth paste-token --provider ollama"
+        description: "GPT-4.1, o3, o4 models"
     ),
     ModelProvider(
         name: "Google",
         key: "google",
         icon: "globe",
-        description: "Gemini models",
-        command: "openclaw models auth paste-token --provider google"
+        description: "Gemini models"
+    ),
+    ModelProvider(
+        name: "Mistral",
+        key: "mistral",
+        icon: "wind",
+        description: "Mistral Large, Codestral, Pixtral"
+    ),
+    ModelProvider(
+        name: "xAI",
+        key: "xai",
+        icon: "bolt.fill",
+        description: "Grok models"
+    ),
+    // --- Aggregators ---
+    ModelProvider(
+        name: "OpenRouter",
+        key: "openrouter",
+        icon: "arrow.triangle.branch",
+        description: "Access 100+ models via OpenRouter"
+    ),
+    ModelProvider(
+        name: "Together AI",
+        key: "together",
+        icon: "square.stack.3d.up",
+        description: "Llama, Mixtral, and more"
+    ),
+    ModelProvider(
+        name: "Hugging Face",
+        key: "huggingface",
+        icon: "face.smiling",
+        description: "Open-source models via HF Inference"
+    ),
+    // --- Additional providers ---
+    ModelProvider(
+        name: "Venice",
+        key: "venice",
+        icon: "building.columns",
+        description: "Privacy-focused AI models"
+    ),
+    ModelProvider(
+        name: "Moonshot",
+        key: "moonshot",
+        icon: "moon.fill",
+        description: "Moonshot AI models"
+    ),
+    ModelProvider(
+        name: "Kimi Coding",
+        key: "kimi-coding",
+        icon: "chevron.left.forwardslash.chevron.right",
+        description: "Kimi coding-focused models"
+    ),
+    ModelProvider(
+        name: "Z.AI",
+        key: "zai",
+        icon: "wand.and.stars",
+        description: "Z.AI / GLM models"
+    ),
+    ModelProvider(
+        name: "Xiaomi",
+        key: "xiaomi",
+        icon: "cpu",
+        description: "Xiaomi MiLM models"
+    ),
+    ModelProvider(
+        name: "MiniMax",
+        key: "minimax",
+        icon: "rectangle.compress.vertical",
+        description: "MiniMax global models"
+    ),
+    ModelProvider(
+        name: "Kilocode",
+        key: "kilocode",
+        icon: "terminal",
+        description: "Kilocode Gateway"
+    ),
+    ModelProvider(
+        name: "Qianfan (Baidu)",
+        key: "qianfan",
+        icon: "cloud.fill",
+        description: "Baidu Qianfan platform"
+    ),
+    ModelProvider(
+        name: "Qwen / Model Studio",
+        key: "modelstudio",
+        icon: "paintbrush",
+        description: "Alibaba Model Studio (Global)"
+    ),
+    // --- Infrastructure ---
+    ModelProvider(
+        name: "LiteLLM",
+        key: "litellm",
+        icon: "server.rack",
+        description: "Unified proxy for any LLM provider"
+    ),
+    ModelProvider(
+        name: "Vercel AI Gateway",
+        key: "vercel-ai-gateway",
+        icon: "arrowshape.turn.up.right.fill",
+        description: "Vercel AI Gateway proxy"
+    ),
+    // --- Local runners (no API key) ---
+    ModelProvider(
+        name: "Ollama (Local)",
+        key: "ollama",
+        icon: "desktopcomputer",
+        description: "Run models locally with Ollama",
+        requiresKey: false
+    ),
+    ModelProvider(
+        name: "vLLM (Local)",
+        key: "vllm",
+        icon: "memorychip",
+        description: "High-throughput local inference",
+        requiresKey: false
+    ),
+    ModelProvider(
+        name: "SGLang (Local)",
+        key: "sglang",
+        icon: "bolt.horizontal",
+        description: "Fast local inference with SGLang",
+        requiresKey: false
     ),
 ]
 
 struct ModelsConfigView: View {
-    @State private var shell = ShellService()
+    var service: OpenClawService
+
     @State private var selectedProvider: ModelProvider?
     @State private var apiKey = ""
     @State private var isSaving = false
@@ -76,9 +200,7 @@ struct ModelsConfigView: View {
                         .textFieldStyle(.roundedBorder)
                     Button("Set") {
                         Task {
-                            let result = await shell.run(
-                                "openclaw models set \"\(defaultModel)\""
-                            )
+                            let result = await service.setDefaultModel(defaultModel)
                             resultMessage = result.exitCode == 0
                                 ? "Default model set!" : result.output
                             resultIsError = result.exitCode != 0
@@ -91,15 +213,13 @@ struct ModelsConfigView: View {
                 HStack {
                     Text("Fallback:")
                         .frame(width: 70, alignment: .trailing)
-                    TextField("e.g. openai/gpt-5.1-codex", text: $fallbackModel)
+                    TextField("e.g. openai/gpt-4.1", text: $fallbackModel)
                         .textFieldStyle(.roundedBorder)
-                    Button("Set") {
+                    Button("Add") {
                         Task {
-                            let result = await shell.run(
-                                "openclaw models fallbacks add \"\(fallbackModel)\""
-                            )
+                            let result = await service.addFallback(model: fallbackModel)
                             resultMessage = result.exitCode == 0
-                                ? "Fallback model set!" : result.output
+                                ? "Fallback model added!" : result.output
                             resultIsError = result.exitCode != 0
                         }
                     }
@@ -121,9 +241,20 @@ struct ModelsConfigView: View {
         .sheet(item: $selectedProvider) { provider in
             apiKeySheet(provider)
         }
+        .task {
+            // Load current default model into the text field
+            if let current = service.modelsStatus?.defaultModel {
+                defaultModel = current
+            }
+        }
     }
 
     // MARK: - Provider Card
+
+    /// Find the provider status from the service's cached modelsStatus
+    private func providerStatus(for key: String) -> ProviderStatus? {
+        service.modelsStatus?.providers.first { $0.provider == key }
+    }
 
     private func providerCard(_ provider: ModelProvider) -> some View {
         HStack(spacing: 12) {
@@ -134,18 +265,51 @@ struct ModelsConfigView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(provider.name)
                     .font(.headline)
-                Text(provider.description)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    if let status = providerStatus(for: provider.key) {
+                        Image(systemName: status.authenticated ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundStyle(status.authenticated ? .green : .red)
+                            .font(.caption)
+                        Text(status.authenticated ? "Configured" : "Not authenticated")
+                            .font(.caption)
+                            .foregroundStyle(status.authenticated ? .green : .secondary)
+                    } else {
+                        Text(provider.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             Spacer()
 
-            Button("Configure") {
-                selectedProvider = provider
-                apiKey = ""
+            if let status = providerStatus(for: provider.key), status.authenticated {
+                Button("Change Key") {
+                    selectedProvider = provider
+                    apiKey = ""
+                    resultMessage = ""
+                }
+                .buttonStyle(.bordered)
+            } else {
+                Button(provider.requiresKey ? "Add Key" : "Enable") {
+                    if provider.requiresKey {
+                        selectedProvider = provider
+                        apiKey = ""
+                        resultMessage = ""
+                    } else {
+                        // No key needed (e.g. Ollama) — configure directly
+                        Task {
+                            isSaving = true
+                            let result = await service.configureProvider(provider: provider.key, apiKey: "")
+                            resultMessage = result.exitCode == 0
+                                ? "\(provider.name) enabled!" : result.output
+                            resultIsError = result.exitCode != 0
+                            isSaving = false
+                        }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(.bordered)
         }
     }
 
@@ -213,11 +377,9 @@ struct ModelsConfigView: View {
             return
         }
 
-        // Step 2: Key is valid — save it
+        // Step 2: Key is valid — save via openclaw onboard (non-interactive)
         resultMessage = "Saving key…"
-        let result = await shell.run(
-            "echo \"\(apiKey)\" | openclaw models auth paste-token --provider \(provider.key)"
-        )
+        let result = await service.configureProvider(provider: provider.key, apiKey: apiKey)
 
         if result.exitCode == 0 {
             resultMessage = "\(provider.name) key validated and saved!"
@@ -233,6 +395,6 @@ struct ModelsConfigView: View {
 }
 
 #Preview {
-    ModelsConfigView()
+    ModelsConfigView(service: OpenClawService())
         .frame(width: 600, height: 500)
 }
