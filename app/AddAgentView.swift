@@ -90,19 +90,21 @@ struct AddAgentView: View {
         resultMessage = ""
 
         // Create workspace directory if needed
-        let mkdirResult = await shell.run("mkdir -p \"\(workspacePath)\"")
-        if mkdirResult.exitCode != 0 {
-            resultMessage = "Failed to create workspace directory"
+        do {
+            try FileManager.default.createDirectory(atPath: workspacePath, withIntermediateDirectories: true)
+        } catch {
+            resultMessage = "Failed to create workspace directory: \(error.localizedDescription)"
             resultIsError = true
             isCreating = false
             return
         }
 
         // Check if SOUL.md exists, create a default one if not
-        let soulCheck = await shell.run("test -f \"\(workspacePath)/SOUL.md\" && echo exists")
-        if !soulCheck.output.contains("exists") {
+        let soulPath = "\(workspacePath)/SOUL.md"
+        if !FileManager.default.fileExists(atPath: soulPath) {
+            let displayNameForSoul = agentDisplayName.isEmpty ? agentName : agentDisplayName
             let defaultSoul = """
-            # \\(agentDisplayName.isEmpty ? agentName : agentDisplayName)
+            # \(displayNameForSoul)
 
             You are a helpful AI assistant.
 
@@ -111,8 +113,7 @@ struct AddAgentView: View {
             - Clear and concise in responses
             - Proactive in offering help
             """
-            let escaped = defaultSoul.replacingOccurrences(of: "\"", with: "\\\"")
-            await shell.run("echo \"\(escaped)\" > \"\(workspacePath)/SOUL.md\"")
+            try? defaultSoul.write(toFile: soulPath, atomically: true, encoding: .utf8)
         }
 
         // Register the agent

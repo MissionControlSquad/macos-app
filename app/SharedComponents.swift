@@ -198,6 +198,56 @@ extension View {
 
 
 
+// MARK: - Blocking Progress Overlay
+
+/// A full-screen blocking overlay that prevents all user interaction while
+/// an operation is in progress. Uses native macOS `.ultraThinMaterial` and
+/// semantic colors so it looks correct in both Light and Dark mode.
+///
+/// Usage:
+/// ```swift
+/// .blockingOverlay(isPresented: $isBusy, message: "Deleting agent…")
+/// ```
+struct BlockingProgressOverlay: View {
+    var message: String
+
+    var body: some View {
+        ZStack {
+            // Scrim — system-aware dimming
+            Color(nsColor: .black).opacity(0.25)
+                .ignoresSafeArea()
+
+            // Centered pill
+            VStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.regular)
+                Text(message)
+                    .font(.system(.body, weight: .medium))
+                    .foregroundStyle(.primary)
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 20)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .shadow(color: .black.opacity(0.15), radius: 12, y: 4)
+        }
+    }
+}
+
+extension View {
+    /// Presents a full-window blocking progress indicator.
+    /// While visible the entire view tree is non-interactive.
+    func blockingOverlay(isPresented: Bool, message: String = "Please wait…") -> some View {
+        self
+            .overlay {
+                if isPresented {
+                    BlockingProgressOverlay(message: message)
+                        .transition(.opacity.animation(.easeInOut(duration: 0.2)))
+                }
+            }
+            .allowsHitTesting(!isPresented)
+    }
+}
+
 // MARK: - Section Header
 
 /// Consistent GroupBox label used across all dashboard pages.

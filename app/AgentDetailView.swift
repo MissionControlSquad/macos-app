@@ -53,6 +53,7 @@ struct AgentDetailView: View {
     // Confirmation dialogs
     @State private var showDeleteConfirm = false
     @State private var showRestartGatewayConfirm = false
+    @State private var isDeleting = false
     @State private var toast = ToastState()
 
     // Per-agent model & auth
@@ -106,14 +107,17 @@ struct AgentDetailView: View {
             }
         }
         .toastOverlay(toast)
+        .blockingOverlay(isPresented: isDeleting, message: "Deleting agent…")
         .confirmationDialog(
             "Delete Agent",
             isPresented: $showDeleteConfirm
         ) {
             Button("Delete \"\(agent.displayName ?? agent.name)\"", role: .destructive) {
                 Task {
+                    isDeleting = true
                     let agentName = agent.displayName ?? agent.name
                     let result = await service.deleteAgent(name: agent.name)
+                    isDeleting = false
                     if result.exitCode == 0 {
                         toast.show("Agent \"\(agentName)\" deleted")
                         onDeleted?()

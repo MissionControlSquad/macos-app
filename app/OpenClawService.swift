@@ -92,12 +92,17 @@ class OpenClawService {
 
     /// Add a new agent
     func addAgent(name: String, workspace: String) async -> CommandResult {
-        // Create workspace and SOUL.md if needed
-        await shell.run("mkdir -p \"\(workspace)\"")
-        let soulCheck = await shell.run("test -f \"\(workspace)/SOUL.md\" && echo exists")
-        if !soulCheck.output.contains("exists") {
-            await shell.run("printf '# \(name)\\nYou are a helpful AI assistant.\\n' > \"\(workspace)/SOUL.md\"")
+        // Create workspace directory if needed
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: workspace, withIntermediateDirectories: true)
+
+        // Create default SOUL.md if one doesn't exist
+        let soulPath = "\(workspace)/SOUL.md"
+        if !fm.fileExists(atPath: soulPath) {
+            let defaultSoul = "# \(name)\nYou are a helpful AI assistant.\n"
+            try? defaultSoul.write(toFile: soulPath, atomically: true, encoding: .utf8)
         }
+
         let result = await shell.run("openclaw agents add \(name) --workspace \"\(workspace)\" --non-interactive")
         if result.exitCode == 0 {
             await fetchAgents()
@@ -114,7 +119,7 @@ class OpenClawService {
         }
 
         // 2. Delete the agent (removes from registry, trashes workspace + state)
-        let result = await shell.run("openclaw agents delete \(name)")
+        let result = await shell.run("openclaw agents delete \(name) --force")
 
         // 3. Always refresh the agents list
         await fetchAgents()

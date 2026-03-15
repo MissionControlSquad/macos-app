@@ -364,6 +364,8 @@ struct DashboardView: View {
     // Confirmation dialogs
     @State private var agentToDelete: Agent?
     @State private var showDeleteConfirm = false
+    @State private var isDeleting = false
+    @State private var isCreatingAgent = false
     @State private var showStopGatewayConfirm = false
     @State private var showUninstallGatewayConfirm = false
 
@@ -379,6 +381,8 @@ struct DashboardView: View {
             detailView
         }
         .toastOverlay(toast)
+        .blockingOverlay(isPresented: isDeleting, message: "Deleting agent…")
+        .blockingOverlay(isPresented: isCreatingAgent, message: "Creating agent…")
         .onChange(of: selection) {
             // Clear stale session ID when switching away from an agent
             openSessionId = nil
@@ -404,8 +408,10 @@ struct DashboardView: View {
         ) { agent in
             Button("Delete \"\(agent.displayName ?? agent.name)\"", role: .destructive) {
                 Task {
+                    isDeleting = true
                     let agentName = agent.displayName ?? agent.name
                     let result = await service.deleteAgent(name: agent.name)
+                    isDeleting = false
                     if result.exitCode == 0 {
                         toast.show("Agent \"\(agentName)\" deleted")
                     } else {
@@ -1546,14 +1552,18 @@ struct DashboardView: View {
             HStack {
                 Button("Cancel") { showAddAgent = false }
                     .buttonStyle(.bordered)
+                    .keyboardShortcut(.cancelAction)
                 Button("Create") {
                     Task {
+                        isCreatingAgent = true
+                        showAddAgent = false
+                        let defaultWorkspace = FileManager.default.homeDirectoryForCurrentUser.path + "/.openclaw/workspace-\(newAgentName)"
                         let result = await service.addAgent(
                             name: newAgentName,
-                            workspace: newAgentWorkspace.isEmpty ? "~/.openclaw/workspace-\(newAgentName)" : newAgentWorkspace
+                            workspace: newAgentWorkspace.isEmpty ? defaultWorkspace : newAgentWorkspace
                         )
+                        isCreatingAgent = false
                         if result.exitCode == 0 {
-                            showAddAgent = false
                             let createdName = newAgentName
                             newAgentName = ""
                             newAgentWorkspace = ""
@@ -1561,11 +1571,13 @@ struct DashboardView: View {
                             toast.show("Agent \"\(createdName)\" created successfully")
                         } else {
                             addAgentError = result.output
+                            showAddAgent = true
                         }
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(newAgentName.isEmpty)
+                .keyboardShortcut(.defaultAction)
             }
         }
         .padding(24)
