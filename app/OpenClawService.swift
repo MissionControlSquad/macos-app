@@ -61,10 +61,10 @@ class OpenClawService {
     }
 
     /// Get bindings for a specific agent
-    func fetchBindings(for agentName: String) async -> [String] {
+    func fetchBindings(for agentName: String) async -> [AgentBinding] {
         let result = await shell.run("openclaw agents bindings --agent \(agentName) --json", recordHistory: false)
         if result.exitCode == 0, let data = result.output.data(using: .utf8) {
-            if let bindings = try? JSONDecoder().decode([String].self, from: data) {
+            if let bindings = try? JSONDecoder().decode([AgentBinding].self, from: data) {
                 return bindings
             }
         }
@@ -110,7 +110,7 @@ class OpenClawService {
         // 1. Unbind all channel routes for the agent
         let bindings = await fetchBindings(for: name)
         for binding in bindings {
-            _ = await shell.run("openclaw agents unbind --agent \(name) --bind \(binding)")
+            _ = await shell.run("openclaw agents unbind --agent \(name) --bind \(binding.bindingSpec)")
         }
 
         // 2. Delete the agent (removes from registry, trashes workspace + state)

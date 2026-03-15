@@ -44,6 +44,28 @@ struct Agent: Identifiable, Codable, Hashable {
     }
 }
 
+// MARK: - Agent Binding
+
+struct AgentBinding: Identifiable, Codable, Hashable {
+    var id: String { description }
+    let agentId: String
+    let match: AgentBindingMatch
+    let description: String
+
+    /// Returns the spec used for CLI bind/unbind commands (e.g. "whatsapp" or "telegram:alerts-bot")
+    var bindingSpec: String {
+        if match.accountId == "default" || match.accountId.isEmpty {
+            return match.channel
+        }
+        return "\(match.channel):\(match.accountId)"
+    }
+}
+
+struct AgentBindingMatch: Codable, Hashable {
+    let channel: String
+    let accountId: String
+}
+
 enum AgentStatus: String {
     case online = "online"
     case offline = "offline"

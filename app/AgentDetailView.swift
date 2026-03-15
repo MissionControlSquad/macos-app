@@ -69,7 +69,7 @@ struct AgentDetailView: View {
     @State private var editEmoji = ""
 
     // Channel bindings
-    @State private var agentBindings: [String] = []
+    @State private var agentBindings: [AgentBinding] = []
     @State private var isLoadingBindings = true
     @State private var showAddBindingPopover = false
     @State private var newBindingChannel = ""
@@ -978,22 +978,29 @@ struct AgentDetailView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 4)
                 } else {
-                    ForEach(agentBindings, id: \.self) { binding in
+                    ForEach(agentBindings) { binding in
                         HStack(spacing: 10) {
-                            Image(systemName: channelIcon(for: binding))
+                            Image(systemName: channelIcon(for: binding.match.channel))
                                 .foregroundStyle(.accent)
                                 .frame(width: 20)
-                            Text(binding)
-                                .font(.system(.body, design: .monospaced))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(binding.match.channel)
+                                    .font(.system(.body, design: .monospaced))
+                                if binding.match.accountId != "default" && !binding.match.accountId.isEmpty {
+                                    Text("account: \(binding.match.accountId)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                             Spacer()
                             Button {
                                 Task {
                                     isBindingBusy = true
-                                    let r = await service.unbindAgent(name: agent.name, channel: binding)
+                                    let r = await service.unbindAgent(name: agent.name, channel: binding.bindingSpec)
                                     isBindingBusy = false
                                     if r.exitCode == 0 {
-                                        agentBindings.removeAll { $0 == binding }
-                                        toast.show("Removed \(binding) binding")
+                                        agentBindings.removeAll { $0.id == binding.id }
+                                        toast.show("Removed \(binding.match.channel) binding")
                                     } else {
                                         toast.show(r.output, isError: true)
                                     }
@@ -1165,14 +1172,20 @@ struct AgentDetailView: View {
 
                 Button("Add Binding") {
                     guard !newBindingChannel.isEmpty else { return }
-                    let bindingSpec = newBindingAccountId.isEmpty ? newBindingChannel : "\(newBindingChannel):\(newBindingAccountId)"
+                    let accountId = newBindingAccountId.isEmpty ? "default" : newBindingAccountId
+                    let bindingSpec = accountId == "default" ? newBindingChannel : "\(newBindingChannel):\(accountId)"
                     Task {
                         isBindingBusy = true
                         showAddBindingPopover = false
                         let r = await service.bindAgent(name: agent.name, channel: bindingSpec)
                         isBindingBusy = false
                         if r.exitCode == 0 {
-                            agentBindings.append(bindingSpec)
+                            let newBinding = AgentBinding(
+                                agentId: agent.name,
+                                match: AgentBindingMatch(channel: newBindingChannel, accountId: accountId),
+                                description: "\(newBindingChannel) accountId=\(accountId)"
+                            )
+                            agentBindings.append(newBinding)
                             toast.show("Bound \(bindingSpec) to \(agent.displayName ?? agent.name)")
                         } else {
                             toast.show(r.output, isError: true)
