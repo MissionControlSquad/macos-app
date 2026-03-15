@@ -81,12 +81,20 @@ class OpenClawService {
         return result
     }
 
-    /// Delete an agent
+    /// Delete an agent — unbinds channel routes first, then deletes agent and refreshes list.
     func deleteAgent(name: String) async -> CommandResult {
-        let result = await shell.run("openclaw agents delete \(name)")
-        if result.exitCode == 0 {
-            await fetchAgents()
+        // 1. Unbind all channel routes for the agent
+        let bindings = await fetchBindings(for: name)
+        for binding in bindings {
+            _ = await shell.run("openclaw agents unbind --agent \(name) --bind \(binding)")
         }
+
+        // 2. Delete the agent (removes from registry, trashes workspace + state)
+        let result = await shell.run("openclaw agents delete \(name)")
+
+        // 3. Always refresh the agents list
+        await fetchAgents()
+
         return result
     }
 
@@ -713,6 +721,12 @@ class OpenClawService {
 
     func removeFallback(model: String) async -> CommandResult {
         return await shell.run("openclaw models fallbacks remove \"\(model)\"")
+    }
+
+    /// Reorder fallback models via a single config set (much faster than clear + N adds)
+    func reorderFallbacks(models: [String]) async -> CommandResult {
+        let json = "[" + models.map { "\"\($0)\"" }.joined(separator: ",") + "]"
+        return await shell.run("openclaw config set agents.defaults.model.fallbacks '\(json)'")
     }
 
     // MARK: - Diagnostics

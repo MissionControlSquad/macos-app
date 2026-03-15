@@ -14,7 +14,6 @@
 		1230BC012F63F61800E128E3 /* MarkdownTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1230BC002F63F61800E128E3 /* MarkdownTextView.swift */; };
 		12976A572F60244900A2B716 /* CronView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12976A562F60244900A2B716 /* CronView.swift */; };
 		12976A592F60244900A2B716 /* HooksView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12976A582F60244900A2B716 /* HooksView.swift */; };
-		12976A5B2F602A0100A2B716 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12976A5A2F602A0100A2B716 /* SettingsView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -26,7 +25,6 @@
 		1269CFD92F5FB63E0028727C /* app.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = app.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		12976A562F60244900A2B716 /* CronView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CronView.swift; sourceTree = "<group>"; };
 		12976A582F60244900A2B716 /* HooksView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HooksView.swift; sourceTree = "<group>"; };
-		12976A5A2F602A0100A2B716 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -55,7 +53,6 @@
 				1269CFDA2F5FB63E0028727C /* Products */,
 				12976A562F60244900A2B716 /* CronView.swift */,
 				12976A582F60244900A2B716 /* HooksView.swift */,
-				12976A5A2F602A0100A2B716 /* SettingsView.swift */,
 				1230BBF82F63F45300E128E3 /* ApprovalsView.swift */,
 				1230BBFA2F63F47600E128E3 /* UsageCostView.swift */,
 				1230BBFC2F63F53700E128E3 /* ToolsCatalogView.swift */,
@@ -152,7 +149,6 @@
 				1230BBFF2F63F53700E128E3 /* DevicesView.swift in Sources */,
 				12976A592F60244900A2B716 /* HooksView.swift in Sources */,
 				1230BBF92F63F45300E128E3 /* ApprovalsView.swift in Sources */,
-				12976A5B2F602A0100A2B716 /* SettingsView.swift in Sources */,
 				1230BBFD2F63F53700E128E3 /* ToolsCatalogView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

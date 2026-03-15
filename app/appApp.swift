@@ -77,8 +77,7 @@ struct AgentCenterApp: App {
                     .keyboardShortcut("4", modifiers: .command)
                 Button("Models") { navigate(.models) }
                     .keyboardShortcut("5", modifiers: .command)
-                Button("Settings") { navigate(.settings) }
-                    .keyboardShortcut("6", modifiers: .command)
+
             }
 
             // Agent actions
@@ -91,9 +90,6 @@ struct AgentCenterApp: App {
             }
         }
 
-        Settings {
-            SettingsSceneView()
-        }
     }
 
     @FocusedValue(\.navigate) private var navigateAction
@@ -113,17 +109,4 @@ struct AgentCenterApp: App {
     }
 }
 
-/// Standalone settings wrapper for the macOS Cmd+, Settings scene.
-struct SettingsSceneView: View {
-    @State private var service = OpenClawService()
-    @State private var gateway = GatewayWebSocket()
 
-    var body: some View {
-        SettingsView(service: service, gateway: gateway)
-            .frame(minWidth: 700, minHeight: 500)
-            .task {
-                gateway.connect()
-                await service.refreshAll()
-            }
-    }
-}

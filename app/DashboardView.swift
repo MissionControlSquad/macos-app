@@ -42,10 +42,6 @@ struct ModelCatalogPicker: View {
             .frame(minWidth: 280)
             .disabled(selectedProvider.isEmpty || providerModels.isEmpty)
 
-            if store.isLoading {
-                ProgressView()
-                    .controlSize(.small)
-            }
         }
         .onAppear {
             syncProviderFromSelection()
@@ -86,13 +82,148 @@ struct ProviderSelectionPicker: View {
     }
 }
 
+/// Reusable sheet for choosing a model (provider → model two-step picker).
+/// Use with `.sheet` and provide context-specific title, description, and action.
+struct ModelChooserSheet: View {
+    var title: String = "Choose Model"
+    var description: String = "Select a provider and model."
+    var actionLabel: String = "Apply"
+    var initialSelection: String = ""
+    var onApply: (String) async -> Bool  // returns true on success
+    var onDismiss: () -> Void
+
+    @State private var selection: String = ""
+    @State private var isSaving = false
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text(title)
+                .font(.title3.bold())
+
+            Text(description)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            ModelCatalogPicker(selection: $selection)
+
+            if !selection.isEmpty {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.caption)
+                    Text(selection)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack {
+                Button("Cancel") {
+                    onDismiss()
+                }
+                .keyboardShortcut(.escape, modifiers: [])
+                .buttonStyle(.bordered)
+
+                Button(isSaving ? "Saving..." : actionLabel) {
+                    Task {
+                        isSaving = true
+                        let success = await onApply(selection)
+                        isSaving = false
+                        if success { onDismiss() }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selection.isEmpty || isSaving)
+            }
+        }
+        .padding(24)
+        .frame(width: 500)
+        .onAppear {
+            selection = initialSelection
+        }
+    }
+}
+
+/// Reusable sheet for configuring an API key (provider picker + secure field).
+/// Use with `.sheet` for both global and per-agent API key configuration.
+struct APIKeySheet: View {
+    var title: String = "Configure API Key"
+    var description: String = "Select a provider and enter your API key."
+    var initialProvider: String = ""
+    var onSave: (String, String) async -> Bool  // (provider, apiKey) -> success
+    var onDismiss: () -> Void
+
+    @State private var provider: String = ""
+    @State private var apiKey: String = ""
+    @State private var isSaving = false
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text(title)
+                .font(.title3.bold())
+
+            Text(description)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            VStack(alignment: .leading, spacing: 12) {
+                LabeledContent("Provider") {
+                    ProviderSelectionPicker(selection: $provider)
+                }
+
+                LabeledContent("API Key") {
+                    SecureField("Paste your API key", text: $apiKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+
+            HStack {
+                Button("Cancel") {
+                    onDismiss()
+                }
+                .keyboardShortcut(.escape, modifiers: [])
+                .buttonStyle(.bordered)
+
+                Button(isSaving ? "Saving..." : "Save") {
+                    Task {
+                        isSaving = true
+                        let success = await onSave(provider, apiKey)
+                        isSaving = false
+                        if success { onDismiss() }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(provider.isEmpty || apiKey.isEmpty || isSaving)
+            }
+        }
+        .padding(24)
+        .frame(width: 420)
+        .onAppear {
+            provider = initialProvider
+        }
+    }
+}
+
 enum SidebarItem: String, Identifiable, CaseIterable {
+    // Main
     case agents = "Agents"
     case sessions = "Sessions"
     case logs = "Logs"
     case gateway = "Gateway"
     case models = "Models"
-    case settings = "Settings"
+    // Advanced
+    case channels = "Channels"
+    case memory = "Memory"
+    case skillsPlugins = "Skills & Plugins"
+    case tools = "Tools"
+    case automation = "Automation"
+    case hooks = "Hooks"
+    case approvals = "Approvals"
+    case devices = "Devices"
+    case usageCost = "Usage & Cost"
+    case terminal = "Terminal"
 
     var id: String { rawValue }
 
@@ -103,8 +234,35 @@ enum SidebarItem: String, Identifiable, CaseIterable {
         case .logs: return "doc.text.magnifyingglass"
         case .gateway: return "server.rack"
         case .models: return "cpu"
-        case .settings: return "gearshape"
+        case .channels: return "message.fill"
+        case .memory: return "brain"
+        case .skillsPlugins: return "puzzlepiece.extension"
+        case .tools: return "wrench.and.screwdriver"
+        case .automation: return "clock.arrow.2.circlepath"
+        case .hooks: return "link"
+        case .approvals: return "checkmark.shield"
+        case .devices: return "desktopcomputer"
+        case .usageCost: return "chart.bar"
+        case .terminal: return "terminal"
         }
+    }
+
+    enum Group: String, CaseIterable {
+        case main
+        case advanced = "Advanced"
+    }
+
+    var group: Group {
+        switch self {
+        case .agents, .sessions, .logs, .gateway, .models:
+            return .main
+        default:
+            return .advanced
+        }
+    }
+
+    static func items(in group: Group) -> [SidebarItem] {
+        allCases.filter { $0.group == group }
     }
 }
 
@@ -156,20 +314,22 @@ struct DashboardView: View {
         ) { agent in
             Button("Delete \"\(agent.displayName ?? agent.name)\"", role: .destructive) {
                 Task {
+                    let agentName = agent.displayName ?? agent.name
                     let result = await service.deleteAgent(name: agent.name)
                     if result.exitCode == 0 {
-                        toast.show("Agent \"\(agent.displayName ?? agent.name)\" deleted")
-                        if selection == "agent:\(agent.id)" {
-                            selection = SidebarItem.agents.rawValue
-                        }
+                        toast.show("Agent \"\(agentName)\" deleted")
                     } else {
                         toast.show("Failed to delete agent: \(result.output)", isError: true)
+                    }
+                    // Navigate away if viewing the deleted agent
+                    if selection == "agent:\(agent.id)" {
+                        selection = SidebarItem.agents.rawValue
                     }
                 }
             }
             Button("Cancel", role: .cancel) {}
         } message: { agent in
-            Text("This will permanently remove \"\(agent.displayName ?? agent.name)\" and its configuration. This action cannot be undone.")
+            Text("This will unbind all channel routes, remove the agent registry entry, and trash its workspace and session data. This cannot be undone.")
         }
         .confirmationDialog(
             "Stop Gateway",
@@ -223,7 +383,7 @@ struct DashboardView: View {
     private var sidebarContent: some View {
         List(selection: $selection) {
             Section {
-                ForEach(SidebarItem.allCases) { item in
+                ForEach(SidebarItem.items(in: .main)) { item in
                     Label(item.rawValue, systemImage: item.icon)
                         .tag(item.rawValue)
                         .badge(badgeCount(for: item))
@@ -257,6 +417,16 @@ struct DashboardView: View {
                     }
                 }
             }
+
+
+
+            Section("Advanced") {
+                ForEach(SidebarItem.items(in: .advanced)) { item in
+                    Label(item.rawValue, systemImage: item.icon)
+                        .tag(item.rawValue)
+                        .badge(badgeCount(for: item))
+                }
+            }
         }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
@@ -280,7 +450,7 @@ struct DashboardView: View {
 
     private func badgeCount(for item: SidebarItem) -> Int {
         switch item {
-        case .gateway:
+        case .gateway, .approvals:
             return gateway.pendingApprovals.count
         default:
             return 0
@@ -299,7 +469,9 @@ struct DashboardView: View {
     @ViewBuilder
     private var detailView: some View {
         if let agent = selectedAgent {
-            AgentDetailView(agent: agent, service: service, initialSessionId: openSessionId)
+            AgentDetailView(agent: agent, service: service, initialSessionId: openSessionId, onDeleted: {
+                selection = SidebarItem.agents.rawValue
+            })
         } else {
             switch selection {
             case SidebarItem.sessions.rawValue:
@@ -313,8 +485,27 @@ struct DashboardView: View {
                 gatewayView
             case SidebarItem.models.rawValue:
                 modelsView
-            case SidebarItem.settings.rawValue:
-                SettingsView(service: service, gateway: gateway)
+            // Advanced
+            case SidebarItem.channels.rawValue:
+                ChannelsView(service: service)
+            case SidebarItem.memory.rawValue:
+                MemoryView(service: service)
+            case SidebarItem.skillsPlugins.rawValue:
+                SkillsPluginsView(service: service)
+            case SidebarItem.tools.rawValue:
+                ToolsCatalogView(gateway: gateway)
+            case SidebarItem.automation.rawValue:
+                CronView(service: service, gateway: gateway)
+            case SidebarItem.hooks.rawValue:
+                HooksView(service: service)
+            case SidebarItem.approvals.rawValue:
+                ApprovalsView(gateway: gateway)
+            case SidebarItem.devices.rawValue:
+                DevicesView(gateway: gateway)
+            case SidebarItem.usageCost.rawValue:
+                UsageCostView(gateway: gateway, service: service)
+            case SidebarItem.terminal.rawValue:
+                TerminalView(service: service)
             default:
                 agentsView
             }
@@ -438,6 +629,11 @@ struct DashboardView: View {
     // MARK: - Gateway View
 
     @State private var gatewayIsActing = false
+    @State private var configKey = ""
+    @State private var configValue = ""
+    @State private var configOutput = ""
+    @State private var configToast = ToastState()
+    @State private var doctorOutput = ""
 
     private var gatewayView: some View {
         ScrollView {
@@ -589,6 +785,127 @@ struct DashboardView: View {
                             }
                         }
                     }
+
+                    // Configuration
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: 8) {
+                                TextField("e.g. gateway.mode", text: $configKey)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(.body, design: .monospaced))
+
+                                TextField("Leave empty to read", text: $configValue)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(.body, design: .monospaced))
+
+                                Button("Get") {
+                                    Task {
+                                        let r = await service.configGet(configKey)
+                                        configOutput = r.output
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(configKey.isEmpty)
+
+                                Button("Set") {
+                                    Task {
+                                        let r = await service.configSet(configKey, value: configValue)
+                                        configToast.show(r.exitCode == 0 ? "\(configKey) updated" : r.output, isError: r.exitCode != 0)
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(configKey.isEmpty || configValue.isEmpty)
+                            }
+
+                            HStack(spacing: 6) {
+                                Text("Common keys:")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                ForEach([
+                                    "gateway.mode",
+                                    "gateway.port",
+                                    "agents.defaults.model.primary",
+                                    "session.dmScope",
+                                ], id: \.self) { key in
+                                    Button(key) { configKey = key }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.mini)
+                                }
+                            }
+
+                            if !configOutput.isEmpty {
+                                Text(configOutput)
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    } label: {
+                        HStack {
+                            Text("Configuration")
+                            Spacer()
+                            Text("Read and write config values using dot-path notation")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    // Diagnostics
+                    GroupBox("Diagnostics") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: 12) {
+                                Button {
+                                    Task {
+                                        let r = await service.runDoctor()
+                                        doctorOutput = r.output
+                                    }
+                                } label: {
+                                    Label("Run Doctor", systemImage: "stethoscope")
+                                }
+                                .buttonStyle(.bordered)
+
+                                Button {
+                                    Task {
+                                        let r = await service.configValidate()
+                                        doctorOutput = r.output
+                                    }
+                                } label: {
+                                    Label("Validate Config", systemImage: "checkmark.shield")
+                                }
+                                .buttonStyle(.bordered)
+
+                                Button {
+                                    Task {
+                                        let r = await service.runCommand("openclaw doctor --repair")
+                                        doctorOutput = r.output
+                                    }
+                                } label: {
+                                    Label("Auto-Fix", systemImage: "wrench.and.screwdriver")
+                                }
+                                .buttonStyle(.bordered)
+
+                                Spacer()
+
+                                Button("Open Config File") {
+                                    let home = FileManager.default.homeDirectoryForCurrentUser.path
+                                    let url = URL(fileURLWithPath: "\(home)/.openclaw/openclaw.json")
+                                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                                }
+                                .buttonStyle(.bordered)
+                            }
+
+                            if !doctorOutput.isEmpty {
+                                ScrollView {
+                                    Text(doctorOutput)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .textSelection(.enabled)
+                                }
+                                .frame(maxHeight: 300)
+                            }
+                        }
+                    }
+
+                    ToastBanner(toast: configToast)
                 }
                 .padding()
         }
@@ -621,170 +938,264 @@ struct DashboardView: View {
 
     // MARK: - Models View
 
-    @State private var configProviderName = ""
-    @State private var configApiKey = ""
     @State private var modelsToast = ToastState()
-    @State private var selectedModel = ""
+    @State private var showChangeModelSheet = false
+    @State private var showConfigureAPISheet = false
+    @State private var showAddFallbackSheet = false
+    @State private var configProviderName = ""
+    @State private var fallbackModels: [String] = []
+    @State private var fallbacksLoaded = false
+    @State private var isSavingFallbackOrder = false
+
+    private var hasDefaultModel: Bool {
+        guard let m = service.modelsStatus?.defaultModel, !m.isEmpty else { return false }
+        return true
+    }
 
     private var modelsView: some View {
         ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    // Current model config
-                    GroupBox("Active Configuration") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text("Default Model:")
-                                    .foregroundStyle(.secondary)
-                                Text(service.modelsStatus?.defaultModel ?? "Not set")
-                                    .font(.system(.body, design: .monospaced))
-                            }
+            VStack(alignment: .leading, spacing: 16) {
+                // Default Model — hero card
+                GroupBox {
+                    if hasDefaultModel {
+                        // Current default model display
+                        HStack(spacing: 12) {
+                            Image(systemName: "cpu")
+                                .font(.title2)
+                                .foregroundStyle(.accent)
 
-                            HStack {
-                                Text("Fallback Models:")
-                                    .foregroundStyle(.secondary)
-                                Text(service.modelsStatus?.fallbacks?.joined(separator: ", ") ?? "Not set")
-                                    .font(.system(.body, design: .monospaced))
-                            }
-
-                            // Set default model via dropdown
-                            HStack(spacing: 8) {
-                                ModelCatalogPicker(selection: $selectedModel)
-                                    .frame(maxWidth: .infinity)
-
-                                Button("Set Default") {
-                                    Task {
-                                        let result = await service.setDefaultModel(selectedModel)
-                                        modelsToast.show(result.exitCode == 0 ? "Default model set to \(selectedModel)" : result.output, isError: result.exitCode != 0)
-                                    }
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(selectedModel.isEmpty)
-
-                                Button {
-                                    ModelCatalogStore.shared.refresh()
-                                } label: {
-                                    Image(systemName: "arrow.clockwise")
-                                }
-                                .buttonStyle(.bordered)
-                                .help("Refresh model list from OpenClaw")
-                            }
-                            .padding(.top, 4)
-                        }
-                    }
-
-                    // Providers with configure buttons
-                    GroupBox("Providers") {
-                        if let providers = service.modelsStatus?.providers, !providers.isEmpty {
-                            ForEach(providers) { provider in
-                                providerRow(provider)
-                            }
-                        } else {
-                            Text("No providers found. Run a scan to discover available providers.")
-                                .foregroundStyle(.secondary)
-                                .font(.callout)
-                        }
-                    }
-
-                    // Configure API Key
-                    GroupBox("Configure API Key") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Enter your API key to authenticate with a provider. The key is stored locally by OpenClaw.")
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-
-                            HStack(spacing: 8) {
-                                TextField("Provider (e.g. anthropic, openai)", text: $configProviderName)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 250)
-
-                                SecureField("API Key", text: $configApiKey)
-                                    .textFieldStyle(.roundedBorder)
-
-                                Button("Save") {
-                                    Task {
-                                        let result = await service.configureProvider(
-                                            provider: configProviderName,
-                                            apiKey: configApiKey
-                                        )
-                                        modelsToast.show(result.exitCode == 0 ? "\(configProviderName) API key configured successfully" : result.output, isError: result.exitCode != 0)
-                                        if result.exitCode == 0 {
-                                            configApiKey = ""
-                                        }
-                                    }
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(configProviderName.isEmpty || configApiKey.isEmpty)
-                            }
-
-                            // Quick provider buttons
-                            HStack(spacing: 8) {
-                                Text("Quick select:")
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Default Model")
                                     .font(.caption)
-                                    .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
-                                ForEach(["anthropic", "openai", "mistral", "openrouter", "huggingface"], id: \.self) { name in
-                                    Button(name) {
-                                        configProviderName = name
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.small)
-                                }
+                                    .foregroundStyle(.secondary)
+                                Text(service.modelsStatus?.defaultModel ?? "")
+                                    .font(.headline.monospaced())
                             }
-                        }
-                    }
 
-                    ToastBanner(toast: modelsToast)
-
-                    // Model management actions
-                    HStack(spacing: 12) {
-                        Button {
-                            Task { await service.runCommand("openclaw models scan --json") }
-                        } label: {
-                            Label("Scan Models", systemImage: "magnifyingglass")
-                        }
-                        .buttonStyle(.bordered)
-
-                        Button {
-                            ModelCatalogStore.shared.refresh()
-                        } label: {
-                            Label("Refresh Catalog", systemImage: "arrow.clockwise")
-                        }
-                        .buttonStyle(.bordered)
-                    }
-
-                    // Model catalog status
-                    let catalog = ModelCatalogStore.shared
-                    GroupBox {
-                        if !catalog.debugLog.isEmpty {
-                            DisclosureGroup("Debug Log") {
-                                ScrollView {
-                                    Text(catalog.debugLog)
-                                        .font(.system(.caption2, design: .monospaced))
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .textSelection(.enabled)
-                                }
-                                .frame(maxHeight: 200)
-                            }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        }
-                    } label: {
-                        HStack {
-                            Text("Model Catalog")
                             Spacer()
-                            Text("\(catalog.models.count) models, \(catalog.providers.count) providers")
+
+                            Button("Change") {
+                                showChangeModelSheet = true
+                            }
+                            .buttonStyle(.bordered)
+                        }
+
+                        // Fallback count hint
+                        if !fallbackModels.isEmpty {
+                            Divider()
+                            HStack(spacing: 12) {
+                                Image(systemName: "arrow.triangle.branch")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 24)
+
+                                Text("\(fallbackModels.count) fallback\(fallbackModels.count == 1 ? "" : "s") configured")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                Spacer()
+                            }
+                        }
+                    } else {
+                        // No default model — prominent CTA
+                        VStack(spacing: 12) {
+                            Image(systemName: "cpu.fill")
+                                .font(.system(size: 32))
+                                .foregroundStyle(.secondary)
+
+                            Text("No Default Model")
+                                .font(.headline)
+
+                            Text("Choose a model to start using your agents. You can change it anytime.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+
+                            Button("Set Default Model") {
+                                showChangeModelSheet = true
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                    }
+                }
+
+                // Fallback Models
+                GroupBox {
+                    if !fallbacksLoaded {
+                        // Loading state
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Loading fallback models…")
+                                .foregroundStyle(.secondary)
+                                .font(.callout)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                    } else if fallbackModels.isEmpty {
+                        // Empty state
+                        VStack(spacing: 10) {
+                            Image(systemName: "arrow.triangle.branch")
+                                .font(.title2)
+                                .foregroundStyle(.secondary)
+                            Text("No fallback models")
+                                .font(.headline)
+                            Text("When the primary model fails or hits rate limits, fallback models are tried in order.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                            Button("Add Fallback Model") {
+                                showAddFallbackSheet = true
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.regular)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                    } else {
+                        // Fallback list with reorder
+                        VStack(spacing: 0) {
+                            ForEach(Array(fallbackModels.enumerated()), id: \.offset) { index, model in
+                                HStack(spacing: 8) {
+                                    // Reorder controls
+                                    VStack(spacing: 0) {
+                                        Button {
+                                            moveFallback(from: index, direction: .up)
+                                        } label: {
+                                            Image(systemName: "chevron.up")
+                                                .font(.caption2.weight(.semibold))
+                                        }
+                                        .buttonStyle(.plain)
+                                        .disabled(index == 0 || isSavingFallbackOrder)
+                                        .foregroundStyle(index == 0 ? .quaternary : .secondary)
+
+                                        Button {
+                                            moveFallback(from: index, direction: .down)
+                                        } label: {
+                                            Image(systemName: "chevron.down")
+                                                .font(.caption2.weight(.semibold))
+                                        }
+                                        .buttonStyle(.plain)
+                                        .disabled(index == fallbackModels.count - 1 || isSavingFallbackOrder)
+                                        .foregroundStyle(index == fallbackModels.count - 1 ? .quaternary : .secondary)
+                                    }
+                                    .frame(width: 16)
+
+                                    Text("\(index + 1)")
+                                        .font(.caption.monospacedDigit().weight(.medium))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 18)
+
+                                    Text(model)
+                                        .font(.body.monospaced())
+
+                                    Spacer()
+
+                                    Button {
+                                        Task {
+                                            let r = await service.removeFallback(model: model)
+                                            modelsToast.show(r.exitCode == 0 ? "Removed \(model)" : r.output, isError: r.exitCode != 0)
+                                            await refreshFallbacks()
+                                        }
+                                    } label: {
+                                        Image(systemName: "minus.circle.fill")
+                                            .foregroundStyle(.red)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Remove fallback")
+                                }
+                                .padding(.vertical, 5)
+                                if index < fallbackModels.count - 1 {
+                                    Divider()
+                                        .padding(.leading, 42)
+                                }
+                            }
+                        }
+
+                        HStack {
+                            Spacer()
+                            Button {
+                                showAddFallbackSheet = true
+                            } label: {
+                                Label("Add Fallback", systemImage: "plus")
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+
+                            Button("Clear All") {
+                                Task {
+                                    let r = await service.runCommand("openclaw models fallbacks clear")
+                                    modelsToast.show(r.exitCode == 0 ? "All fallbacks cleared" : r.output, isError: r.exitCode != 0)
+                                    await refreshFallbacks()
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                        .padding(.top, 6)
+                    }
+                } label: {
+                    HStack {
+                        Text("Fallback Models")
+                        if !fallbackModels.isEmpty {
+                            Text("·")
+                                .foregroundStyle(.secondary)
+                            Text("\(fallbackModels.count)")
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if isSavingFallbackOrder {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Saving…")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            if catalog.isLoading {
-                                ProgressView()
-                                    .controlSize(.small)
-                                Text("Loading...")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
+                        } else {
+                            Text("Tried in order when the primary model fails")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
                 }
-                .padding()
+
+                // Providers
+                GroupBox("Providers") {
+                    if let providers = service.modelsStatus?.providers, !providers.isEmpty {
+                        VStack(spacing: 0) {
+                            ForEach(Array(providers.enumerated()), id: \.element.id) { index, provider in
+                                providerRow(provider)
+                                if index < providers.count - 1 {
+                                    Divider()
+                                }
+                            }
+                        }
+                    } else {
+                        HStack {
+                            Image(systemName: "network.slash")
+                                .foregroundStyle(.secondary)
+                            Text("No providers found. Refresh to discover available providers.")
+                                .foregroundStyle(.secondary)
+                                .font(.callout)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
+                // Add API Key button (for providers not in the list)
+                Button {
+                    configProviderName = ""
+                    showConfigureAPISheet = true
+                } label: {
+                    Label("Add API Key", systemImage: "key")
+                }
+                .buttonStyle(.bordered)
+
+                ToastBanner(toast: modelsToast)
+            }
+            .padding()
         }
         .navigationTitle("Models")
         .toolbar {
@@ -797,27 +1208,123 @@ struct DashboardView: View {
                 .help("Refresh models status")
             }
         }
+        .sheet(isPresented: $showChangeModelSheet) {
+            ModelChooserSheet(
+                title: hasDefaultModel ? "Change Default Model" : "Set Default Model",
+                description: "Select a provider and model to use as the default for all agents.",
+                actionLabel: "Set Default",
+                initialSelection: hasDefaultModel ? (service.modelsStatus?.defaultModel ?? "") : "",
+                onApply: { model in
+                    let result = await service.setDefaultModel(model)
+                    if result.exitCode == 0 {
+                        modelsToast.show("Default model set to \(model)")
+                    } else {
+                        modelsToast.show(result.output, isError: true)
+                    }
+                    return result.exitCode == 0
+                },
+                onDismiss: { showChangeModelSheet = false }
+            )
+        }
+        .sheet(isPresented: $showConfigureAPISheet) {
+            APIKeySheet(
+                title: "Configure API Key",
+                description: "Enter your API key to authenticate with a provider. Keys are stored locally by OpenClaw.",
+                initialProvider: configProviderName,
+                onSave: { provider, apiKey in
+                    let result = await service.configureProvider(provider: provider, apiKey: apiKey)
+                    if result.exitCode == 0 {
+                        modelsToast.show("\(provider.capitalized) API key configured")
+                    } else {
+                        modelsToast.show(result.output, isError: true)
+                    }
+                    return result.exitCode == 0
+                },
+                onDismiss: { showConfigureAPISheet = false }
+            )
+        }
+        .sheet(isPresented: $showAddFallbackSheet) {
+            ModelChooserSheet(
+                title: "Add Fallback Model",
+                description: "Choose a model to add to the fallback chain. Fallbacks are tried in order when the primary model fails.",
+                actionLabel: "Add Fallback",
+                onApply: { model in
+                    let r = await service.addFallback(model: model)
+                    modelsToast.show(r.exitCode == 0 ? "Fallback \(model) added" : r.output, isError: r.exitCode != 0)
+                    if r.exitCode == 0 { await refreshFallbacks() }
+                    return r.exitCode == 0
+                },
+                onDismiss: { showAddFallbackSheet = false }
+            )
+        }
+        .task {
+            await refreshFallbacks()
+        }
     }
+
+    private func refreshFallbacks() async {
+        let r = await service.listFallbacks()
+        // Output format: "Fallbacks (N):\n- model/a\n- model/b"
+        // When empty: "Fallbacks (0):\n- none"
+        // Parse only lines starting with "- ", strip prefix, exclude "none" placeholder
+        let lines = r.output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.hasPrefix("- ") }
+            .map { String($0.dropFirst(2)) }
+            .filter { $0 != "none" }
+        fallbackModels = lines
+        fallbacksLoaded = true
+    }
+
+    private enum MoveDirection { case up, down }
+
+    private func moveFallback(from index: Int, direction: MoveDirection) {
+        let newIndex = direction == .up ? index - 1 : index + 1
+        guard newIndex >= 0, newIndex < fallbackModels.count else { return }
+        guard !isSavingFallbackOrder else { return }
+
+        // Optimistic reorder for instant feedback
+        let moved = fallbackModels[index]
+        fallbackModels.remove(at: index)
+        fallbackModels.insert(moved, at: newIndex)
+
+        // Persist the new order
+        let newOrder = fallbackModels
+        isSavingFallbackOrder = true
+        Task {
+            let r = await service.reorderFallbacks(models: newOrder)
+            isSavingFallbackOrder = false
+            if r.exitCode != 0 {
+                modelsToast.show("Reorder failed: \(r.output)", isError: true)
+                await refreshFallbacks() // revert to server state
+            }
+        }
+    }
+
+    
+
+    // MARK: - Provider Row
 
     private func providerRow(_ provider: ProviderStatus) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: provider.authenticated == true ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundStyle(provider.authenticated == true ? Color.green : Color.red)
+            Image(systemName: provider.authenticated ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .foregroundStyle(provider.authenticated ? Color.green : Color.red)
                 .font(.title3)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(provider.name)
+                Text(provider.name.capitalized)
                     .font(.body.weight(.medium))
-                Text(provider.authenticated == true ? "Authenticated" : "No API key configured")
+                Text(provider.authenticated ? "Authenticated" : "No API key configured")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
 
-            if provider.authenticated != true {
-                Button("Configure") {
+            if !provider.authenticated {
+                Button("Add Key") {
                     configProviderName = provider.name
+                    showConfigureAPISheet = true
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -825,7 +1332,7 @@ struct DashboardView: View {
                 StatusBadge(label: "Connected", color: Color.green)
             }
         }
-        .padding(6)
+        .padding(.vertical, 4)
     }
 
     // MARK: - Add Agent Sheet

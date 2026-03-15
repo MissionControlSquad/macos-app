@@ -4,6 +4,7 @@ enum AgentTab: String, CaseIterable {
     case chat = "Chat"
     case files = "Files"
     case sessions = "Sessions"
+    case model = "Model"
     case info = "Info"
 
     var icon: String {
@@ -11,6 +12,7 @@ enum AgentTab: String, CaseIterable {
         case .chat: return "bubble.left.and.bubble.right.fill"
         case .files: return "doc.text.fill"
         case .sessions: return "clock.fill"
+        case .model: return "cpu"
         case .info: return "info.circle.fill"
         }
     }
@@ -20,6 +22,7 @@ struct AgentDetailView: View {
     let agent: Agent
     @Bindable var service: OpenClawService
     var initialSessionId: String? = nil
+    var onDeleted: (() -> Void)? = nil
     @State private var selectedTab: AgentTab = .chat
 
     // Gateway WebSocket
@@ -52,6 +55,15 @@ struct AgentDetailView: View {
     @State private var showRestartGatewayConfirm = false
     @State private var toast = ToastState()
 
+    // Per-agent model & auth
+    @State private var agentModel = ""
+    @State private var showModelChooser = false
+    @State private var showAPIKeySheet = false
+
+    // Identity editing
+    @State private var editDisplayName = ""
+    @State private var editEmoji = ""
+
     var body: some View {
         VStack(spacing: 0) {
             tabBar
@@ -64,6 +76,8 @@ struct AgentDetailView: View {
                 filesView
             case .sessions:
                 sessionsView
+            case .model:
+                modelView
             case .info:
                 infoView
             }
@@ -82,9 +96,11 @@ struct AgentDetailView: View {
         ) {
             Button("Delete \"\(agent.displayName ?? agent.name)\"", role: .destructive) {
                 Task {
+                    let agentName = agent.displayName ?? agent.name
                     let result = await service.deleteAgent(name: agent.name)
                     if result.exitCode == 0 {
-                        toast.show("Agent \"\(agent.displayName ?? agent.name)\" deleted")
+                        toast.show("Agent \"\(agentName)\" deleted")
+                        onDeleted?()
                     } else {
                         toast.show("Failed to delete agent: \(result.output)", isError: true)
                     }
@@ -92,7 +108,7 @@ struct AgentDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will permanently remove \"\(agent.displayName ?? agent.name)\" and its configuration. This action cannot be undone.")
+            Text("This will unbind all channel routes, remove the agent registry entry, and trash its workspace and session data. This cannot be undone.")
         }
         .confirmationDialog(
             "Restart Gateway",
@@ -779,8 +795,40 @@ struct AgentDetailView: View {
 
     private var infoView: some View {
         Form {
-            Section("Agent") {
-                LabeledContent("Name", value: agent.name)
+            Section {
+                LabeledContent("Display Name") {
+                    TextField("Display Name", text: $editDisplayName)
+                        .textFieldStyle(.roundedBorder)
+                }
+                LabeledContent("Emoji") {
+                    TextField("e.g. 🤖", text: $editEmoji)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                }
+                HStack {
+                    Spacer()
+                    Button("Save Identity") {
+                        Task {
+                            let r = await service.setAgentIdentity(
+                                name: agent.name,
+                                displayName: editDisplayName.isEmpty ? nil : editDisplayName,
+                                emoji: editEmoji.isEmpty ? nil : editEmoji
+                            )
+                            toast.show(r.exitCode == 0 ? "Identity updated" : r.output, isError: r.exitCode != 0)
+                            if r.exitCode == 0 { await service.fetchAgents() }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+            } header: {
+                Text("Identity")
+            } footer: {
+                Text("Set the display name and emoji shown in the sidebar and channels.")
+            }
+
+            Section("Agent Details") {
+                LabeledContent("Agent ID", value: agent.name)
                 LabeledContent("Workspace", value: agent.workspace)
                 LabeledContent("Agent Dir", value: agent.agentDir ?? "—")
                 LabeledContent("Default", value: agent.isDefault == true ? "Yes" : "No")
@@ -788,11 +836,45 @@ struct AgentDetailView: View {
             }
 
             if let routes = agent.routes, !routes.isEmpty {
-                Section("Routes") {
+                Section("Channel Routes") {
                     ForEach(routes, id: \.self) { route in
                         Label(route, systemImage: "arrow.triangle.branch")
                     }
                 }
+            }
+
+            Section {
+                let files: [(name: String, desc: String)] = [
+                    ("AGENTS.md", "Operating instructions and memory rules"),
+                    ("SOUL.md", "Persona, tone, and behavioral boundaries"),
+                    ("USER.md", "Information about the user"),
+                    ("IDENTITY.md", "Agent name and vibe"),
+                    ("TOOLS.md", "Guidance on local tools"),
+                ]
+                ForEach(files, id: \.name) { file in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(file.name)
+                                .font(.system(.body, design: .monospaced))
+                            Text(file.desc)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Open") {
+                            let path = agent.workspace.isEmpty
+                                ? "\(FileManager.default.homeDirectoryForCurrentUser.path)/.openclaw/workspace/\(file.name)"
+                                : "\(agent.workspace)/\(file.name)"
+                            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+            } header: {
+                Text("Workspace Instruction Files")
+            } footer: {
+                Text("These files control agent behavior. They are injected into the agent's context at the start of each session.")
             }
 
             Section("Actions") {
@@ -814,6 +896,98 @@ struct AgentDetailView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear {
+            editDisplayName = agent.displayName ?? ""
+            editEmoji = agent.emoji ?? ""
+        }
+    }
+
+    // MARK: - Model View
+
+    private var modelView: some View {
+        Form {
+            Section {
+                HStack {
+                    Text(agentModel.isEmpty ? "Using global default" : agentModel)
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(agentModel.isEmpty ? .secondary : .primary)
+                    Spacer()
+                    Button(agentModel.isEmpty ? "Set Model" : "Change") {
+                        showModelChooser = true
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            } header: {
+                Text("Primary Model")
+            } footer: {
+                Text("Set a specific model for this agent. Leave empty to use the global default.")
+            }
+
+            Section {
+                if let fallbacks = service.modelsStatus?.fallbacks, !fallbacks.isEmpty {
+                    ForEach(fallbacks, id: \.self) { fallback in
+                        Text(fallback)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("No global fallbacks configured.")
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Fallback Models")
+            } footer: {
+                Text("Fallback models are configured globally on the Models page. All agents share the same fallback chain.")
+            }
+
+            Section {
+                HStack {
+                    Spacer()
+                    Button("Configure API Key") {
+                        showAPIKeySheet = true
+                    }
+                    .buttonStyle(.bordered)
+                }
+            } header: {
+                Text("Agent API Key")
+            } footer: {
+                Text("Configure a provider API key specifically for this agent, overriding the global key.")
+            }
+        }
+        .formStyle(.grouped)
+        .sheet(isPresented: $showModelChooser) {
+            ModelChooserSheet(
+                title: "Model for \(agent.displayName ?? agent.name)",
+                description: "Choose a model specifically for this agent, overriding the global default.",
+                actionLabel: "Apply",
+                initialSelection: agentModel,
+                onApply: { model in
+                    let r = await service.setAgentModel(agent: agent.name, model: model)
+                    toast.show(r.exitCode == 0 ? "Model set for \(agent.name)" : r.output, isError: r.exitCode != 0)
+                    if r.exitCode == 0 { agentModel = model }
+                    return r.exitCode == 0
+                },
+                onDismiss: { showModelChooser = false }
+            )
+        }
+
+        .sheet(isPresented: $showAPIKeySheet) {
+            APIKeySheet(
+                title: "API Key for \(agent.displayName ?? agent.name)",
+                description: "Configure a provider API key specifically for this agent, overriding the global key.",
+                onSave: { provider, apiKey in
+                    let r = await service.configureAgentAuth(
+                        agent: agent.name,
+                        provider: provider,
+                        apiKey: apiKey
+                    )
+                    toast.show(r.exitCode == 0 ? "\(provider) key saved" : r.output, isError: r.exitCode != 0)
+                    return r.exitCode == 0
+                },
+                onDismiss: { showAPIKeySheet = false }
+            )
+        }
     }
 
     // MARK: - Helpers
