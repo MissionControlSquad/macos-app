@@ -1339,13 +1339,8 @@ struct AgentDetailView: View {
                                     Task {
                                         validatingProvider = provider.name
                                         providerValidationResults.removeValue(forKey: provider.name)
-                                        if agentAuthOverrides.contains(provider.name) {
-                                            let status = await service.validateAgentProviderAuth(agent: agent.name, provider: provider.name)
-                                            providerValidationResults[provider.name] = status?.authenticated == true
-                                        } else {
-                                            let status = await service.validateProviderAuth(provider: provider.name)
-                                            providerValidationResults[provider.name] = status?.authenticated == true
-                                        }
+                                        let result = await service.validateProviderLive(provider: provider.name)
+                                        providerValidationResults[provider.name] = result.isValid
                                         validatingProvider = ""
                                     }
                                 }
@@ -1356,9 +1351,16 @@ struct AgentDetailView: View {
 
                             if agentAuthOverrides.contains(provider.name) {
                                 Button("Remove Override") {
-                                    agentAuthOverrides.remove(provider.name)
-                                    providerValidationResults.removeValue(forKey: provider.name)
-                                    toast.show("Reverted \(provider.name.capitalized) to global key")
+                                    Task {
+                                        let r = await service.removeAgentProviderAuth(agent: agent.name, provider: provider.name)
+                                        if r.exitCode == 0 {
+                                            agentAuthOverrides.remove(provider.name)
+                                            providerValidationResults.removeValue(forKey: provider.name)
+                                            toast.show("Reverted \(provider.name.capitalized) to global key")
+                                        } else {
+                                            toast.show(r.output, isError: true)
+                                        }
+                                    }
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
@@ -1423,8 +1425,8 @@ struct AgentDetailView: View {
                     }
                     return r.exitCode == 0
                 },
-                onValidate: { provider in
-                    await service.validateAgentProviderAuth(agent: agent.name, provider: provider)
+                onValidateKey: { provider, apiKey in
+                    await OpenClawService.validateAPIKey(provider: provider, apiKey: apiKey)
                 },
                 onDismiss: {
                     showAPIKeySheet = false

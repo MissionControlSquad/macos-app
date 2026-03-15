@@ -201,15 +201,27 @@ struct ModelsConfigView: View {
 
     private func saveApiKey(_ provider: ModelProvider) async {
         isSaving = true
-        // Pipe the token into the auth command
+
+        // Step 1: Validate the key with a real API call
+        resultMessage = "Validating key…"
+        resultIsError = false
+        let validation = await OpenClawService.validateAPIKey(provider: provider.key, apiKey: apiKey)
+        if !validation.isValid {
+            resultMessage = validation.error ?? "Invalid API key"
+            resultIsError = true
+            isSaving = false
+            return
+        }
+
+        // Step 2: Key is valid — save it
+        resultMessage = "Saving key…"
         let result = await shell.run(
             "echo \"\(apiKey)\" | openclaw models auth paste-token --provider \(provider.key)"
         )
 
         if result.exitCode == 0 {
-            resultMessage = "\(provider.name) key saved!"
+            resultMessage = "\(provider.name) key validated and saved!"
             resultIsError = false
-            // Dismiss after a moment
             try? await Task.sleep(for: .seconds(1))
             selectedProvider = nil
         } else {

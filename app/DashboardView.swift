@@ -152,7 +152,8 @@ struct APIKeySheet: View {
     var description: String = "Select a provider and enter your API key."
     var initialProvider: String = ""
     var onSave: (String, String) async -> Bool  // (provider, apiKey) -> success
-    var onValidate: ((String) async -> ProviderStatus?)? = nil  // (provider) -> status
+    var onValidate: ((String) async -> ProviderStatus?)? = nil  // (provider) -> status (legacy CLI check)
+    var onValidateKey: ((String, String) async -> OpenClawService.APIKeyValidation)? = nil  // (provider, apiKey) -> real API check
     var onDismiss: () -> Void
 
     enum ValidationState: Equatable {
@@ -252,21 +253,21 @@ struct APIKeySheet: View {
                 } else {
                     Button("Save & Validate") {
                         Task {
+                            // Step 1: Validate the key with a real API call first
+                            if let onValidateKey {
+                                validation = .validating
+                                let result = await onValidateKey(provider, apiKey)
+                                if !result.isValid {
+                                    validation = .invalid(result.error ?? "API key is invalid")
+                                    return
+                                }
+                            }
+
+                            // Step 2: Key is valid (or no real validation available) — save it
                             validation = .saving
                             let success = await onSave(provider, apiKey)
                             if success {
-                                if let onValidate {
-                                    validation = .validating
-                                    let status = await onValidate(provider)
-                                    if status?.authenticated == true {
-                                        validation = .valid
-                                    } else {
-                                        validation = .invalid("Key saved but validation failed. The key may be incorrect or the provider may be unreachable.")
-                                    }
-                                } else {
-                                    // No validate callback — just close on success
-                                    onDismiss()
-                                }
+                                validation = .valid
                             } else {
                                 validation = .invalid("Failed to save the API key. Check the key format and try again.")
                             }
@@ -1033,6 +1034,7 @@ struct DashboardView: View {
     @State private var fallbacksLoaded = false
     @State private var isSavingFallbackOrder = false
     @State private var validatingProvider = ""
+    @State private var removingProvider: String?
     @State private var providerValidationResults: [String: Bool] = [:]  // provider -> isValid
 
     private var hasDefaultModel: Bool {
@@ -1340,8 +1342,8 @@ struct DashboardView: View {
                     }
                     return result.exitCode == 0
                 },
-                onValidate: { provider in
-                    await service.validateProviderAuth(provider: provider)
+                onValidateKey: { provider, apiKey in
+                    await OpenClawService.validateAPIKey(provider: provider, apiKey: apiKey)
                 },
                 onDismiss: { showConfigureAPISheet = false }
             )
@@ -1451,14 +1453,14 @@ struct DashboardView: View {
                     Task {
                         validatingProvider = provider.name
                         providerValidationResults.removeValue(forKey: provider.name)
-                        let status = await service.validateProviderAuth(provider: provider.name)
-                        providerValidationResults[provider.name] = status?.authenticated == true
+                        let result = await service.validateProviderLive(provider: provider.name)
+                        providerValidationResults[provider.name] = result.isValid
                         validatingProvider = ""
                     }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .disabled(!validatingProvider.isEmpty)
+                .disabled(!validatingProvider.isEmpty || removingProvider == provider.name)
 
                 Button("Change Key") {
                     configProviderName = provider.name
@@ -1474,6 +1476,28 @@ struct DashboardView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
             }
+
+            // Remove button — available for all providers
+            Button {
+                Task {
+                    removingProvider = provider.name
+                    _ = await service.removeProviderAuth(provider: provider.name)
+                    removingProvider = nil
+                    providerValidationResults.removeValue(forKey: provider.name)
+                    modelsToast.show("\(provider.name.capitalized) removed")
+                }
+            } label: {
+                if removingProvider == provider.name {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "trash")
+                        .foregroundStyle(.red)
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(removingProvider != nil)
+            .help("Remove \(provider.name.capitalized) provider")
         }
         .padding(.vertical, 4)
     }

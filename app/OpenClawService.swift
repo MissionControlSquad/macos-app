@@ -340,10 +340,151 @@ class OpenClawService {
     /// Configure a provider API key via `openclaw onboard` (non-interactive)
     func configureProvider(provider: String, apiKey: String) async -> CommandResult {
         let escaped = apiKey.replacingOccurrences(of: "\"", with: "\\\"")
-        // Provider-specific flags documented at docs.openclaw.ai/providers/*
-        let cmd = "openclaw onboard --non-interactive --auth-choice \(provider)-api-key --\(provider)-api-key \"\(escaped)\""
+
+        // Map provider display names → onboard CLI --auth-choice and --flag values.
+        // Derived from `openclaw onboard --help`.
+        let authChoice: String
+        let flagName: String
+        switch provider.lowercased() {
+        case "google":
+            authChoice = "gemini-api-key"
+            flagName = "gemini-api-key"
+        case "openai":
+            authChoice = "openai-api-key"
+            flagName = "openai-api-key"
+        case "anthropic":
+            authChoice = "anthropic-api-key"
+            flagName = "anthropic-api-key"
+        case "mistral":
+            authChoice = "mistral-api-key"
+            flagName = "mistral-api-key"
+        case "openrouter":
+            authChoice = "openrouter-api-key"
+            flagName = "openrouter-api-key"
+        case "xai":
+            authChoice = "xai-api-key"
+            flagName = "xai-api-key"
+        case "together":
+            authChoice = "together-api-key"
+            flagName = "together-api-key"
+        case "huggingface":
+            authChoice = "huggingface-api-key"
+            flagName = "huggingface-api-key"
+        case "kimi-coding":
+            authChoice = "kimi-code-api-key"
+            flagName = "kimi-code-api-key"
+        case "zai":
+            authChoice = "zai-api-key"
+            flagName = "zai-api-key"
+        case "minimax":
+            authChoice = "minimax-global-api"
+            flagName = "minimax-api-key"
+        case "minimax-cn":
+            authChoice = "minimax-cn-api"
+            flagName = "minimax-api-key"
+        case "opencode":
+            authChoice = "opencode-zen"
+            flagName = "opencode-zen-api-key"
+        case "opencode-go":
+            authChoice = "opencode-go"
+            flagName = "opencode-go-api-key"
+        case "volcengine":
+            authChoice = "volcengine-api-key"
+            flagName = "volcengine-api-key"
+        case "moonshot":
+            authChoice = "moonshot-api-key"
+            flagName = "moonshot-api-key"
+        case "litellm":
+            authChoice = "litellm-api-key"
+            flagName = "litellm-api-key"
+        case "venice":
+            authChoice = "venice-api-key"
+            flagName = "venice-api-key"
+        case "xiaomi":
+            authChoice = "xiaomi-api-key"
+            flagName = "xiaomi-api-key"
+        case "byteplus":
+            authChoice = "byteplus-api-key"
+            flagName = "byteplus-api-key"
+        case "ollama":
+            // Ollama has no API key — just register it
+            let cmd = "openclaw onboard --non-interactive --accept-risk --auth-choice ollama"
+            let result = await shell.run(cmd)
+            await fetchModelsStatus()
+            return result
+        default:
+            authChoice = "\(provider)-api-key"
+            flagName = "\(provider)-api-key"
+        }
+
+        let cmd = "openclaw onboard --non-interactive --accept-risk --auth-choice \(authChoice) --\(flagName) \"\(escaped)\""
         let result = await shell.run(cmd)
         await fetchModelsStatus()
+        return result
+    }
+
+    /// Remove a provider entirely: auth profiles + allowed models.
+    func removeProviderAuth(provider: String) async -> CommandResult {
+        // 1. Remove auth profiles (try common patterns)
+        _ = await shell.run("openclaw config unset 'auth.profiles.\(provider):default'")
+        _ = await shell.run("openclaw config unset 'auth.profiles.\(provider):manual'")
+        _ = await shell.run("openclaw config unset 'auth.profiles.\(provider)'")
+
+        // 2. Remove this provider's models from the allowed list (agents.defaults.models)
+        //    Get the current models map, find keys starting with "<provider>/"
+        let modelsResult = await shell.run("openclaw config get agents.defaults.models", recordHistory: false)
+        if modelsResult.exitCode == 0,
+           let data = modelsResult.output.data(using: .utf8),
+           let models = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let prefix = provider + "/"
+            let toRemove = models.keys.filter { $0.hasPrefix(prefix) }
+            for modelKey in toRemove {
+                _ = await shell.run("openclaw config unset 'agents.defaults.models.\(modelKey)'")
+            }
+        }
+
+        // 3. Locally remove the provider from cached modelsStatus for immediate UI update.
+        //    The gateway caches old config, so fetchModelsStatus() would still show the removed provider.
+        if let current = modelsStatus {
+            let filteredProviders = current.providers.filter { $0.provider != provider }
+            let filteredAllowed = current.allowed?.filter { !$0.hasPrefix(provider + "/") }
+            // Re-encode without the removed provider
+            if let authData = try? JSONEncoder().encode(current),
+               var json = try? JSONSerialization.jsonObject(with: authData) as? [String: Any] {
+                // Rebuild auth.oauth.providers without the removed provider
+                if var auth = json["auth"] as? [String: Any],
+                   var oauth = auth["oauth"] as? [String: Any] {
+                    if let providersData = try? JSONEncoder().encode(filteredProviders),
+                       let providersArray = try? JSONSerialization.jsonObject(with: providersData) {
+                        oauth["providers"] = providersArray
+                        auth["oauth"] = oauth
+                        json["auth"] = auth
+                    }
+                }
+                json["allowed"] = filteredAllowed
+                if let rebuiltData = try? JSONSerialization.data(withJSONObject: json),
+                   let rebuilt = try? JSONDecoder().decode(ModelsStatus.self, from: rebuiltData) {
+                    modelsStatus = rebuilt
+                }
+            }
+        }
+
+        // 4. Restart gateway so it picks up the config changes
+        _ = await shell.run("openclaw gateway restart", recordHistory: false)
+        try? await Task.sleep(for: .seconds(2))
+
+        // 5. Re-fetch from gateway (should now reflect the removal)
+        await fetchModelsStatus()
+
+        return CommandResult(command: "removeProviderAuth", output: "", timestamp: Date(), exitCode: 0)
+    }
+
+    /// Remove an agent-specific provider auth override
+    func removeAgentProviderAuth(agent: String, provider: String) async -> CommandResult {
+        var result = await shell.run("openclaw config unset 'agents.\(agent).auth.profiles.\(provider):default'")
+        if result.exitCode != 0 {
+            result = await shell.run("openclaw config unset 'agents.\(agent).auth.profiles.\(provider):manual'")
+        }
         return result
     }
 
@@ -360,6 +501,51 @@ class OpenClawService {
         return status.providers.first { $0.provider == provider }
     }
 
+    /// Validate a provider by making a live API call using the stored key/token.
+    /// Reads the API key or OAuth token from auth-profiles.json and calls the provider's endpoint.
+    func validateProviderLive(provider: String) async -> APIKeyValidation {
+        // Read the auth-profiles.json to find the stored key
+        let result = await shell.run("openclaw config get auth", recordHistory: false)
+        guard result.exitCode == 0 else {
+            return APIKeyValidation(isValid: false, error: "Could not read auth config")
+        }
+
+        // Try to find the stored key from auth-profiles.json directly
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let profilesPath = "\(home)/.openclaw/agents/main/agent/auth-profiles.json"
+        guard let profilesData = FileManager.default.contents(atPath: profilesPath),
+              let profilesJson = try? JSONSerialization.jsonObject(with: profilesData) as? [String: Any],
+              let profiles = profilesJson["profiles"] as? [String: Any] else {
+            return APIKeyValidation(isValid: false, error: "Could not read auth profiles")
+        }
+
+        // Look for a profile matching this provider (try common ID patterns)
+        let candidateIds = ["\(provider):default", "\(provider):manual", provider]
+        var storedKey: String?
+        var profileType: String?
+
+        for candidateId in candidateIds {
+            if let profile = profiles[candidateId] as? [String: Any] {
+                profileType = profile["type"] as? String
+                if profileType == "api_key" {
+                    storedKey = profile["key"] as? String
+                } else if profileType == "oauth" {
+                    storedKey = profile["access"] as? String
+                } else if profileType == "token" {
+                    storedKey = profile["token"] as? String ?? profile["key"] as? String
+                }
+                if storedKey != nil { break }
+            }
+        }
+
+        guard let apiKey = storedKey, !apiKey.isEmpty else {
+            return APIKeyValidation(isValid: false, error: "No stored key found for \(provider)")
+        }
+
+        // validateAPIKey handles provider name routing (including openai-codex → openai)
+        return await Self.validateAPIKey(provider: provider, apiKey: apiKey)
+    }
+
     /// Validate a provider's key for a specific agent.
     func validateAgentProviderAuth(agent: String, provider: String) async -> ProviderStatus? {
         let result = await shell.run("openclaw models --agent \(agent) status --check --json", recordHistory: false)
@@ -368,6 +554,231 @@ class OpenClawService {
             return nil
         }
         return status.providers.first { $0.provider == provider }
+    }
+
+    // MARK: - Real API Key Validation
+
+    /// Result of a real API key validation call
+    struct APIKeyValidation {
+        let isValid: Bool
+        let error: String?
+    }
+
+    /// Validate an API key by making a real HTTP request to the provider.
+    /// Routes to the appropriate provider-specific validation function.
+    static func validateAPIKey(provider: String, apiKey: String) async -> APIKeyValidation {
+        switch provider.lowercased() {
+        case "google":
+            return await validateGoogleKey(apiKey)
+        case "openai", "openai-codex":
+            return await validateOpenAIKey(apiKey)
+        case "anthropic":
+            return await validateAnthropicKey(apiKey)
+        case "mistral":
+            return await validateMistralKey(apiKey)
+        case "openrouter":
+            return await validateOpenRouterKey(apiKey)
+        case "xai":
+            return await validateBearerKey(apiKey, url: "https://api.x.ai/v1/models", name: "xAI")
+        case "groq":
+            return await validateBearerKey(apiKey, url: "https://api.groq.com/openai/v1/models", name: "Groq")
+        case "together":
+            return await validateBearerKey(apiKey, url: "https://api.together.xyz/v1/models", name: "Together")
+        case "cerebras":
+            return await validateBearerKey(apiKey, url: "https://api.cerebras.ai/v1/models", name: "Cerebras")
+        case "huggingface":
+            return await validateBearerKey(apiKey, url: "https://huggingface.co/api/whoami-v2", name: "HuggingFace")
+        case "ollama":
+            return await validateOllamaKey(apiKey)
+        default:
+            // For providers without a known validation endpoint, accept the key
+            return APIKeyValidation(isValid: true, error: nil)
+        }
+    }
+
+    /// Google Gemini: GET /v1beta/models?key=<key>
+    private static func validateGoogleKey(_ apiKey: String) async -> APIKeyValidation {
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models?key=\(apiKey)") else {
+            return APIKeyValidation(isValid: false, error: "Invalid API key format")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 15
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return APIKeyValidation(isValid: false, error: "Invalid response")
+            }
+            if http.statusCode == 200 {
+                return APIKeyValidation(isValid: true, error: nil)
+            }
+            let body = String(data: data, encoding: .utf8) ?? ""
+            if http.statusCode == 400 || http.statusCode == 403 {
+                return APIKeyValidation(isValid: false, error: "Invalid API key")
+            }
+            return APIKeyValidation(isValid: false, error: "HTTP \(http.statusCode): \(body.prefix(200))")
+        } catch {
+            return APIKeyValidation(isValid: false, error: error.localizedDescription)
+        }
+    }
+
+    /// OpenAI: GET /v1/models with Bearer token
+    private static func validateOpenAIKey(_ apiKey: String) async -> APIKeyValidation {
+        guard let url = URL(string: "https://api.openai.com/v1/models") else {
+            return APIKeyValidation(isValid: false, error: "Invalid URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 15
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return APIKeyValidation(isValid: false, error: "Invalid response")
+            }
+            if http.statusCode == 200 {
+                return APIKeyValidation(isValid: true, error: nil)
+            }
+            if http.statusCode == 401 {
+                return APIKeyValidation(isValid: false, error: "Invalid API key")
+            }
+            let body = String(data: data, encoding: .utf8) ?? ""
+            return APIKeyValidation(isValid: false, error: "HTTP \(http.statusCode): \(body.prefix(200))")
+        } catch {
+            return APIKeyValidation(isValid: false, error: error.localizedDescription)
+        }
+    }
+
+    /// Anthropic: GET /v1/models with x-api-key header
+    private static func validateAnthropicKey(_ apiKey: String) async -> APIKeyValidation {
+        guard let url = URL(string: "https://api.anthropic.com/v1/models") else {
+            return APIKeyValidation(isValid: false, error: "Invalid URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.timeoutInterval = 15
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return APIKeyValidation(isValid: false, error: "Invalid response")
+            }
+            if http.statusCode == 200 {
+                return APIKeyValidation(isValid: true, error: nil)
+            }
+            if http.statusCode == 401 {
+                return APIKeyValidation(isValid: false, error: "Invalid API key")
+            }
+            let body = String(data: data, encoding: .utf8) ?? ""
+            return APIKeyValidation(isValid: false, error: "HTTP \(http.statusCode): \(body.prefix(200))")
+        } catch {
+            return APIKeyValidation(isValid: false, error: error.localizedDescription)
+        }
+    }
+
+    /// Mistral: GET /v1/models with Bearer token
+    private static func validateMistralKey(_ apiKey: String) async -> APIKeyValidation {
+        guard let url = URL(string: "https://api.mistral.ai/v1/models") else {
+            return APIKeyValidation(isValid: false, error: "Invalid URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 15
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return APIKeyValidation(isValid: false, error: "Invalid response")
+            }
+            if http.statusCode == 200 {
+                return APIKeyValidation(isValid: true, error: nil)
+            }
+            if http.statusCode == 401 {
+                return APIKeyValidation(isValid: false, error: "Invalid API key")
+            }
+            let body = String(data: data, encoding: .utf8) ?? ""
+            return APIKeyValidation(isValid: false, error: "HTTP \(http.statusCode): \(body.prefix(200))")
+        } catch {
+            return APIKeyValidation(isValid: false, error: error.localizedDescription)
+        }
+    }
+
+    /// OpenRouter: GET /api/v1/models with Bearer token
+    private static func validateOpenRouterKey(_ apiKey: String) async -> APIKeyValidation {
+        guard let url = URL(string: "https://openrouter.ai/api/v1/models") else {
+            return APIKeyValidation(isValid: false, error: "Invalid URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 15
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return APIKeyValidation(isValid: false, error: "Invalid response")
+            }
+            if http.statusCode == 200 {
+                return APIKeyValidation(isValid: true, error: nil)
+            }
+            if http.statusCode == 401 || http.statusCode == 403 {
+                return APIKeyValidation(isValid: false, error: "Invalid API key")
+            }
+            let body = String(data: data, encoding: .utf8) ?? ""
+            return APIKeyValidation(isValid: false, error: "HTTP \(http.statusCode): \(body.prefix(200))")
+        } catch {
+            return APIKeyValidation(isValid: false, error: error.localizedDescription)
+        }
+    }
+
+    /// Ollama: GET /api/tags on localhost — no key needed, just check reachability
+    private static func validateOllamaKey(_ apiKey: String) async -> APIKeyValidation {
+        guard let url = URL(string: "http://localhost:11434/api/tags") else {
+            return APIKeyValidation(isValid: false, error: "Invalid URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 10
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return APIKeyValidation(isValid: false, error: "Invalid response")
+            }
+            if http.statusCode == 200 {
+                return APIKeyValidation(isValid: true, error: nil)
+            }
+            return APIKeyValidation(isValid: false, error: "Ollama returned HTTP \(http.statusCode)")
+        } catch {
+            return APIKeyValidation(isValid: false, error: "Ollama not reachable at localhost:11434. Is it running?")
+        }
+    }
+
+    /// Generic Bearer token validation: GET a URL with Authorization: Bearer header.
+    /// Works for any OpenAI-compatible provider (xAI, Groq, Together, Cerebras, HuggingFace, etc.)
+    private static func validateBearerKey(_ apiKey: String, url urlString: String, name: String) async -> APIKeyValidation {
+        guard let url = URL(string: urlString) else {
+            return APIKeyValidation(isValid: false, error: "Invalid URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 15
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return APIKeyValidation(isValid: false, error: "Invalid response")
+            }
+            if http.statusCode == 200 {
+                return APIKeyValidation(isValid: true, error: nil)
+            }
+            if http.statusCode == 401 || http.statusCode == 403 {
+                return APIKeyValidation(isValid: false, error: "Invalid API key")
+            }
+            let body = String(data: data, encoding: .utf8) ?? ""
+            return APIKeyValidation(isValid: false, error: "HTTP \(http.statusCode): \(body.prefix(200))")
+        } catch {
+            return APIKeyValidation(isValid: false, error: "\(name) not reachable: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Sessions
