@@ -1,0 +1,65 @@
+name: Bug report
+description: Something in the app is broken or behaves differently from its documentation.
+title: "bug: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. **Security problems must be reported privately**
+        through [Report a vulnerability](https://github.com/MissionControlSquad/macos-app/security/advisories/new), not here.
+
+        Problems in OpenClaw itself (the `openclaw` CLI or gateway) belong in OpenClaw's own tracker.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched existing issues and discussions and this has not been reported.
+          required: true
+        - label: I reproduced this with a build from the latest `main`.
+          required: true
+        - label: I removed API keys, tokens, phone numbers and other personal data from everything I paste below.
+          required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you see, and what did you expect to see instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The smallest set of steps that shows the problem.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or output
+      description: Paste text, not screenshots. This is rendered as code, so no backticks are needed.
+      render: shell
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: |
+        macOS version:
+        Mac (Apple silicon / Intel):
+        Xcode version:
+        OpenClaw version (`openclaw --version`):
+        Commit you built from:
+      render: markdown
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: Links, references, or what you have already tried.

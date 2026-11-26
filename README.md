@@ -6,8 +6,7 @@ gateway, so everything runs on the machine.
 
 > [!NOTE]
 > The hosted AgentCenter service at agentcenter.cloud has been shut down. This app never depended on
-> it: it only uses the local `openclaw` CLI and the gateway on `127.0.0.1`, so it keeps working. This
-> repository is private.
+> it: it only uses the local `openclaw` CLI and the gateway on `127.0.0.1`, so it keeps working.
 
 ## What it does
 
@@ -33,8 +32,9 @@ gateway, so everything runs on the machine.
 2. Select the `app` scheme and your Mac as the destination.
 3. Press Run.
 
-Signing uses your own development team: set it under the target's **Signing & Capabilities** before the
-first run. The bundle identifier is `agentcenter.app`.
+The project ships without a development team. Pick your own under the target's **Signing & Capabilities**
+before the first run, and keep that change out of your commits. The bundle identifier is `agentcenter.app`;
+change it too if you distribute your own build.
 
 ## How it works
 
@@ -55,6 +55,12 @@ OpenClaw's own configuration lives under `~/.openclaw/`. The app changes it most
 and edits OpenClaw's auth profile file directly when you change or remove a provider key. Provider keys
 therefore sit in OpenClaw's files on the Mac, not in this app.
 
+## Contributing and security
+
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+- Report security problems privately as described in [SECURITY.md](SECURITY.md), never in a public issue.
+- Questions and ideas go to [Discussions](https://github.com/MissionControlSquad/macos-app/discussions).
+
 ## License
 
-Private and proprietary. Copyright © 2026 Jagodana LLC. All rights reserved.
+[MIT](LICENSE). Copyright © 2026 Jagodana LLC. OpenClaw is a separate project with its own license.

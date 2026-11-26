@@ -3,7 +3,7 @@
 //  AgentCenter
 //
 //  Created by DHARMIK JAGODANA on 10/03/26.
-//  Copyright © 2026 Jagodana LLC. All rights reserved.
+//  Copyright © 2026 Jagodana LLC. Licensed under the MIT License (see LICENSE).
 //
 
 import SwiftUI
@@ -127,7 +127,7 @@ struct AgentCenterApp: App {
                 }
                 Divider()
                 Button("Report an Issue...") {
-                    if let url = URL(string: "https://github.com/anthropics/claude-code/issues") {
+                    if let url = URL(string: "https://github.com/MissionControlSquad/macos-app/issues/new/choose") {
                         NSWorkspace.shared.open(url)
                     }
                 }
@@ -166,7 +166,7 @@ struct AgentCenterApp: App {
         Version \(version) (\(build))
         Mission Control for Your OpenClaw Agents
 
-        © 2026 Jagodana LLC. All rights reserved.
+        © 2026 Jagodana LLC. Released under the MIT License.
         https://agentcenter.cloud
         """
         alert.alertStyle = .informational
