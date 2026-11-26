@@ -17,6 +17,8 @@ permissions: {}
 jobs:
   analysis:
     name: Scorecard analysis
+    # Needs GitHub code security features that only public repositories get for free.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

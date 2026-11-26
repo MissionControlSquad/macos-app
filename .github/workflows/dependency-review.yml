@@ -15,6 +15,8 @@ concurrency:
 jobs:
   dependency-review:
     name: Dependency review
+    # Needs GitHub code security features that only public repositories get for free.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
